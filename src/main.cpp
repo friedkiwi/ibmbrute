@@ -53,8 +53,20 @@ std::string format_number(std::uint64_t value) {
 }
 
 std::string format_rate(double value) {
+    const char* suffix = "";
+    if (value >= 1e9) {
+        value /= 1e9;
+        suffix = "g";
+    } else if (value >= 1e6) {
+        value /= 1e6;
+        suffix = "m";
+    } else if (value >= 1e3) {
+        value /= 1e3;
+        suffix = "k";
+    }
+
     std::ostringstream oss;
-    oss << std::fixed << std::setprecision(value >= 1000.0 ? 0 : 1) << value;
+    oss << std::fixed << std::setprecision(3) << value << suffix;
     return oss.str();
 }
 
