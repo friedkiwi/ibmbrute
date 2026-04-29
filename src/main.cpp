@@ -1,5 +1,6 @@
 #include "dst_hash.hpp"
 
+#include <algorithm>
 #include <csignal>
 #include <chrono>
 #include <cctype>
@@ -102,6 +103,7 @@ struct Config {
     std::string password;
     std::string session_path;
     std::string restore_path;
+    std::string hashfile_path;
     std::string charset = "ibm";
     std::string mask;
     std::string custom1;
@@ -197,6 +199,7 @@ Options:
   -t, --target HASH          16 hex chars target hash
       --compute              Print the hash for --user/--password
       --password PASS        Password to hash in --compute mode
+      --hashfile FILE        Read HASH or USER:HASH lines from FILE
       --charset NAME|TEXT    Charset for length-based brute force
                              Built-ins: ibm, full
       --mask MASK            Hashcat-style mask with ?1.. ?4 placeholders
@@ -217,6 +220,7 @@ struct ResumeData {
     std::string mode;
     std::string user;
     std::string target_hex;
+    std::string hashfile_path;
     std::string charset;
     std::string mask;
     std::string custom1;
@@ -225,6 +229,7 @@ struct ResumeData {
     std::string custom4;
     std::size_t min_len = 0;
     std::size_t max_len = 0;
+    std::size_t target_index = 0;
     std::uint64_t position = 0;
     bool compute = false;
 };
@@ -250,6 +255,7 @@ void save_resume(const std::string& path, const ResumeData& data) {
     write_kv(out, "mode", data.mode);
     write_kv(out, "user", data.user);
     write_kv(out, "target", data.target_hex);
+    write_kv(out, "hashfile", data.hashfile_path);
     write_kv(out, "charset", data.charset);
     write_kv(out, "mask", data.mask);
     write_kv(out, "custom1", data.custom1);
@@ -258,6 +264,7 @@ void save_resume(const std::string& path, const ResumeData& data) {
     write_kv(out, "custom4", data.custom4);
     write_kv(out, "min_len", data.min_len);
     write_kv(out, "max_len", data.max_len);
+    write_kv(out, "target_index", data.target_index);
     write_kv(out, "position", data.position);
     write_kv(out, "compute", static_cast<std::size_t>(data.compute ? 1 : 0));
 }
@@ -293,6 +300,7 @@ ResumeData load_resume(const std::string& path) {
     data.mode = get("mode");
     data.user = get("user");
     data.target_hex = get("target");
+    data.hashfile_path = get("hashfile");
     data.charset = get("charset");
     data.mask = get("mask");
     data.custom1 = get("custom1");
@@ -301,6 +309,7 @@ ResumeData load_resume(const std::string& path) {
     data.custom4 = get("custom4");
     data.min_len = static_cast<std::size_t>(std::stoull(get("min_len", "0")));
     data.max_len = static_cast<std::size_t>(std::stoull(get("max_len", "0")));
+    data.target_index = static_cast<std::size_t>(std::stoull(get("target_index", "0")));
     data.position = std::stoull(get("position", "0"));
     data.compute = std::stoull(get("compute", "0")) != 0;
     return data;
@@ -333,6 +342,8 @@ Config parse_args(int argc, char** argv, std::vector<std::string>& positional) {
             cfg.target_hex = need_value(arg.c_str());
         } else if (arg == "--password") {
             cfg.password = need_value(arg.c_str());
+        } else if (arg == "--hashfile" || arg == "--hash-file") {
+            cfg.hashfile_path = need_value(arg.c_str());
         } else if (arg == "--charset") {
             cfg.charset = need_value(arg.c_str());
         } else if (arg == "--mask") {
@@ -403,6 +414,86 @@ bool verify_note_vectors() {
     return ok;
 }
 
+struct TargetEntry {
+    std::string user;
+    std::string target_hex;
+    dst::Block8 target;
+};
+
+bool is_hex_string(std::string_view s) {
+    if (s.size() != 16) {
+        return false;
+    }
+    return std::all_of(s.begin(), s.end(), [](unsigned char ch) { return std::isxdigit(ch) != 0; });
+}
+
+TargetEntry parse_hash_line(const std::string& raw_line,
+                            const std::string& fallback_user,
+                            std::size_t line_no) {
+    const std::string line = trim(raw_line);
+    if (line.empty() || line[0] == '#') {
+        throw std::runtime_error("blank or comment line cannot be parsed as a hash");
+    }
+
+    const auto sep = line.rfind(':');
+    if (sep == std::string::npos) {
+        if (fallback_user.empty()) {
+            throw std::runtime_error("hashfile line " + std::to_string(line_no) +
+                                     " requires a user or a global --user");
+        }
+        return {fallback_user, line, dst::hex_decode8(line)};
+    }
+
+    const std::string left = trim(line.substr(0, sep));
+    const std::string right = trim(line.substr(sep + 1));
+    const bool left_is_hash = is_hex_string(left);
+    const bool right_is_hash = is_hex_string(right);
+
+    if (right_is_hash && !left.empty()) {
+        return {left, right, dst::hex_decode8(right)};
+    }
+    if (left_is_hash && !right.empty()) {
+        return {right, left, dst::hex_decode8(left)};
+    }
+
+    throw std::runtime_error("hashfile line " + std::to_string(line_no) +
+                             " must be HASH or USER:HASH");
+}
+
+std::vector<TargetEntry> load_targets(const Config& cfg) {
+    std::vector<TargetEntry> targets;
+    if (!cfg.hashfile_path.empty()) {
+        std::ifstream in(cfg.hashfile_path);
+        if (!in) {
+            throw std::runtime_error("failed to open hashfile: " + cfg.hashfile_path);
+        }
+
+        std::string line;
+        std::size_t line_no = 0;
+        while (std::getline(in, line)) {
+            ++line_no;
+            const std::string trimmed = trim(line);
+            if (trimmed.empty() || trimmed[0] == '#') {
+                continue;
+            }
+            targets.push_back(parse_hash_line(trimmed, cfg.user, line_no));
+        }
+        if (targets.empty()) {
+            throw std::runtime_error("hashfile contained no targets");
+        }
+        return targets;
+    }
+
+    if (cfg.target_hex.empty()) {
+        throw std::runtime_error("missing target hash");
+    }
+    if (cfg.user.empty()) {
+        throw std::runtime_error("missing --user");
+    }
+    targets.push_back({cfg.user, cfg.target_hex, dst::hex_decode8(cfg.target_hex)});
+    return targets;
+}
+
 std::vector<Pattern> build_plan_from_config(const Config& cfg) {
     if (!cfg.mask.empty()) {
         return build_plan_from_mask(cfg.mask, cfg.custom1, cfg.custom2, cfg.custom3, cfg.custom4);
@@ -415,6 +506,7 @@ ResumeData to_resume(const Config& cfg, std::uint64_t position) {
     data.mode = cfg.mask.empty() ? "lengths" : "mask";
     data.user = cfg.user;
     data.target_hex = cfg.target_hex;
+    data.hashfile_path = cfg.hashfile_path;
     data.charset = builtin_charset(cfg.charset);
     data.mask = cfg.mask;
     data.custom1 = cfg.custom1;
@@ -423,6 +515,7 @@ ResumeData to_resume(const Config& cfg, std::uint64_t position) {
     data.custom4 = cfg.custom4;
     data.min_len = cfg.min_len;
     data.max_len = cfg.max_len;
+    data.target_index = 0;
     data.position = position;
     data.compute = cfg.compute;
     return data;
@@ -456,8 +549,18 @@ int main(int argc, char** argv) {
 
         if (!cfg.restore_path.empty()) {
             const ResumeData restored = load_resume(cfg.restore_path);
-            cfg.user = restored.user;
-            cfg.target_hex = restored.target_hex;
+            if (!restored.user.empty()) {
+                cfg.user = restored.user;
+            }
+            if (!restored.target_hex.empty()) {
+                cfg.target_hex = restored.target_hex;
+            }
+            if (!restored.hashfile_path.empty()) {
+                if (!cfg.hashfile_path.empty() && cfg.hashfile_path != restored.hashfile_path) {
+                    throw std::runtime_error("restore file hashfile does not match --hashfile");
+                }
+                cfg.hashfile_path = restored.hashfile_path;
+            }
             cfg.charset = restored.charset.empty() ? cfg.charset : restored.charset;
             cfg.mask = restored.mask;
             cfg.custom1 = restored.custom1;
@@ -469,23 +572,24 @@ int main(int argc, char** argv) {
             cfg.compute = restored.compute;
         }
 
-        if (cfg.user.empty()) {
-            throw std::runtime_error("missing --user");
-        }
-
-        if (!cfg.compute) {
-            if (cfg.target_hex.empty()) {
-                if (positional.empty()) {
-                    throw std::runtime_error("missing target hash");
-                }
-                cfg.target_hex = positional.front();
-            }
-            if (cfg.target_hex.empty()) {
+        if (cfg.hashfile_path.empty() && cfg.target_hex.empty() && !cfg.compute) {
+            if (positional.empty()) {
                 throw std::runtime_error("missing target hash");
             }
+            cfg.target_hex = positional.front();
+        }
+
+        if (!cfg.hashfile_path.empty() && !cfg.target_hex.empty()) {
+            throw std::runtime_error("use either --hashfile or --target, not both");
         }
 
         if (cfg.compute) {
+            if (!cfg.hashfile_path.empty()) {
+                throw std::runtime_error("--compute is not compatible with --hashfile");
+            }
+            if (cfg.user.empty()) {
+                throw std::runtime_error("missing --user");
+            }
             if (cfg.password.empty()) {
                 throw std::runtime_error("missing --password in --compute mode");
             }
@@ -494,106 +598,133 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        const auto target = dst::hex_decode8(cfg.target_hex);
         const auto plan = build_plan_from_config(cfg);
+        const auto targets = load_targets(cfg);
 
-        std::uint64_t total = 0;
+        std::uint64_t per_target_total = 0;
         for (const auto& pattern : plan) {
-            if (total > std::numeric_limits<std::uint64_t>::max() - pattern.total) {
+            if (per_target_total > std::numeric_limits<std::uint64_t>::max() - pattern.total) {
                 throw std::runtime_error("search space overflow");
             }
-            total += pattern.total;
+            per_target_total += pattern.total;
         }
-        if (total == 0) {
+        if (per_target_total == 0) {
             throw std::runtime_error("empty search space");
         }
 
+        std::size_t start_target_index = 0;
         std::uint64_t start_position = 0;
         if (!cfg.restore_path.empty()) {
             const ResumeData restored = load_resume(cfg.restore_path);
+            start_target_index = restored.target_index;
             start_position = restored.position;
         }
 
-        if (start_position >= total) {
-            throw std::runtime_error("resume position exceeds search space");
+        if (start_target_index > targets.size()) {
+            throw std::runtime_error("resume target index exceeds hashfile targets");
+        }
+        if (start_target_index == targets.size() && start_position != 0) {
+            throw std::runtime_error("resume position exceeds hashfile targets");
         }
 
-        std::uint64_t global_position = 0;
-        std::uint64_t processed = start_position;
+        std::uint64_t total_work = per_target_total;
+        if (targets.size() > 1) {
+            if (per_target_total > std::numeric_limits<std::uint64_t>::max() / targets.size()) {
+                throw std::runtime_error("search space overflow");
+            }
+            total_work = per_target_total * static_cast<std::uint64_t>(targets.size());
+        }
+
+        std::uint64_t processed = static_cast<std::uint64_t>(start_target_index) * per_target_total + start_position;
         auto started = std::chrono::steady_clock::now();
         auto last_status = started;
-        bool found = false;
-        std::string found_password;
+        bool any_cracked = false;
 
-        std::size_t pattern_index = 0;
-        std::uint64_t local_position = start_position;
-        while (pattern_index < plan.size() && local_position >= plan[pattern_index].total) {
-            local_position -= plan[pattern_index].total;
-            global_position += plan[pattern_index].total;
-            ++pattern_index;
-        }
+        for (std::size_t target_index = start_target_index; target_index < targets.size(); ++target_index) {
+            const auto& target = targets[target_index];
+            std::uint64_t global_position = 0;
+            std::uint64_t local_position = (target_index == start_target_index) ? start_position : 0;
+            while (!plan.empty() && local_position >= plan[0].total) {
+                local_position -= plan[0].total;
+                global_position += plan[0].total;
+            }
 
-        for (; pattern_index < plan.size(); ++pattern_index) {
-            const auto& pattern = plan[pattern_index];
-            const std::uint64_t begin = local_position;
-            local_position = 0;
-            for (std::uint64_t idx = begin; idx < pattern.total; ++idx) {
-                if (g_stop) {
-                    if (!cfg.session_path.empty()) {
-                        save_resume(cfg.session_path, to_resume(cfg, global_position + idx + 1));
+            bool found = false;
+            std::string found_password;
+
+            for (std::size_t pattern_index = 0; pattern_index < plan.size(); ++pattern_index) {
+                const auto& pattern = plan[pattern_index];
+                const std::uint64_t begin = (pattern_index == 0) ? local_position : 0;
+                local_position = 0;
+                for (std::uint64_t idx = begin; idx < pattern.total; ++idx) {
+                    if (g_stop) {
+                        if (!cfg.session_path.empty()) {
+                            ResumeData resume = to_resume(cfg, global_position + idx + 1);
+                            resume.target_index = target_index;
+                            resume.target_hex = target.target_hex;
+                            resume.user = target.user;
+                            save_resume(cfg.session_path, resume);
+                        }
+                        std::cerr << "\ninterrupted, session saved if configured\n";
+                        return 130;
                     }
-                    std::cerr << "\ninterrupted, session saved if configured\n";
-                    return 130;
+
+                    const std::string candidate = pattern.candidate(idx);
+                    const auto actual = dst::hash_password(candidate, target.user);
+                    ++processed;
+                    if (actual == target.target) {
+                        found = true;
+                        found_password = candidate;
+                        any_cracked = true;
+                        std::cout << target.user << ':' << found_password << " -> " << target.target_hex << '\n';
+                        if (!cfg.session_path.empty()) {
+                            ResumeData resume = to_resume(cfg, 0);
+                            resume.target_index = target_index + 1;
+                            resume.target_hex = target.target_hex;
+                            resume.user = target.user;
+                            save_resume(cfg.session_path, resume);
+                        }
+                        break;
+                    }
+
+                    const auto now = std::chrono::steady_clock::now();
+                    const double elapsed = std::chrono::duration<double>(now - started).count();
+                    if (cfg.status && elapsed >= static_cast<double>(cfg.status_interval) &&
+                        now - last_status >= std::chrono::seconds(static_cast<int>(cfg.status_interval))) {
+                        const double rate = processed / std::max(elapsed, 0.001);
+                        const double remaining = total_work > processed ? static_cast<double>(total_work - processed) / rate : 0.0;
+                        std::cerr << "\r"
+                                  << "target " << (target_index + 1) << '/' << targets.size()
+                                  << " " << target.user << ':' << target.target_hex
+                                  << " progress " << format_number(processed) << '/' << format_number(total_work)
+                                  << " (" << std::fixed << std::setprecision(2)
+                                  << (100.0 * static_cast<double>(processed) / static_cast<double>(total_work)) << "%)"
+                                  << " " << format_rate(rate) << " c/s"
+                                  << " eta " << format_duration(remaining)
+                                  << " current=" << candidate << std::flush;
+                        last_status = now;
+                    }
                 }
-
-                const std::string candidate = pattern.candidate(idx);
-                const auto actual = dst::hash_password(candidate, cfg.user);
-                ++processed;
-                if (actual == target) {
-                    found = true;
-                    found_password = candidate;
-                    if (!cfg.session_path.empty()) {
-                        save_resume(cfg.session_path, to_resume(cfg, global_position + idx + 1));
-                    }
+                global_position += pattern.total;
+                if (found) {
                     break;
                 }
-
-                const auto now = std::chrono::steady_clock::now();
-                const double elapsed = std::chrono::duration<double>(now - started).count();
-                if (cfg.status && elapsed >= static_cast<double>(cfg.status_interval) &&
-                    now - last_status >= std::chrono::seconds(static_cast<int>(cfg.status_interval))) {
-                    const double rate = processed / std::max(elapsed, 0.001);
-                    const double remaining = total > processed ? static_cast<double>(total - processed) / rate : 0.0;
-                    std::cerr << "\r"
-                              << "progress " << format_number(processed) << '/' << format_number(total)
-                              << " (" << std::fixed << std::setprecision(2)
-                              << (100.0 * static_cast<double>(processed) / static_cast<double>(total)) << "%)"
-                              << " " << format_rate(rate) << " c/s"
-                              << " eta " << format_duration(remaining)
-                              << " current=" << candidate << std::flush;
-                    last_status = now;
-                }
             }
-            global_position += pattern.total;
-            if (found) {
-                break;
+
+            if (cfg.status) {
+                std::cerr << '\r' << std::string(140, ' ') << '\r';
+            }
+
+            if (!found) {
+                std::cout << target.user << ':' << target.target_hex << " -> not found\n";
             }
         }
 
-        if (cfg.status) {
-            std::cerr << '\r' << std::string(120, ' ') << '\r';
+        if (!any_cracked) {
+            std::cout << "no match in " << format_number(total_work) << " candidates\n";
+            return 1;
         }
-
-        if (found) {
-            std::cout << cfg.user << ':' << found_password << " -> " << cfg.target_hex << '\n';
-            return 0;
-        }
-
-        if (!cfg.session_path.empty()) {
-            save_resume(cfg.session_path, to_resume(cfg, total));
-        }
-        std::cout << "no match in " << format_number(total) << " candidates\n";
-        return 1;
+        return 0;
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << '\n';
         return 1;
