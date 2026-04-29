@@ -359,17 +359,16 @@ std::size_t batch_size()
     return kBatchSize;
 }
 
-bool crack_batch(const std::vector<dst::Block8>& encoded_passwords,
-                 const dst::Block8& user,
-                 const dst::Block8& target,
-                 std::size_t& match_index)
+std::vector<std::size_t> crack_batch_matches(const std::vector<dst::Block8>& encoded_passwords,
+                                             const dst::Block8& user,
+                                             const dst::Block8& target)
 {
     MetalState& s = state();
     if (!s.ready()) {
         throw std::runtime_error(s.error.empty() ? "Metal backend is not available" : s.error);
     }
     if (encoded_passwords.empty()) {
-        return false;
+        return {};
     }
     if (encoded_passwords.size() > static_cast<std::size_t>(std::numeric_limits<uint32_t>::max())) {
         throw std::runtime_error("Metal batch is too large");
@@ -428,15 +427,16 @@ bool crack_batch(const std::vector<dst::Block8>& encoded_passwords,
         [command_buffer waitUntilCompleted];
 
         const auto* matches = static_cast<const std::uint32_t*>([match_buffer contents]);
+        std::vector<std::size_t> match_indices;
         for (std::size_t i = 0; i < candidate_count; ++i) {
             if (matches[i] != 0) {
-                match_index = i;
-                return true;
+                match_indices.push_back(i);
             }
         }
+        return match_indices;
     }
 
-    return false;
+    return {};
 }
 
 }  // namespace metal_backend

@@ -13,10 +13,9 @@ bool compiled();
 bool available();
 std::string device_description();
 std::size_t batch_size();
-bool crack_batch(const std::vector<dst::Block8>& encoded_passwords,
-                 const dst::Block8& user,
-                 const dst::Block8& target,
-                 std::size_t& match_index);
+std::vector<std::size_t> crack_batch_matches(const std::vector<dst::Block8>& encoded_passwords,
+                                             const dst::Block8& user,
+                                             const dst::Block8& target);
 
 }  // namespace metal_backend
 #else
@@ -34,11 +33,10 @@ inline std::size_t batch_size() {
     return 0;
 }
 
-inline bool crack_batch(const std::vector<dst::Block8>&,
-                        const dst::Block8&,
-                        const dst::Block8&,
-                        std::size_t&) {
-    return false;
+inline std::vector<std::size_t> crack_batch_matches(const std::vector<dst::Block8>&,
+                                                    const dst::Block8&,
+                                                    const dst::Block8&) {
+    return {};
 }
 
 }  // namespace metal_backend

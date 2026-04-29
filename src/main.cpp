@@ -119,6 +119,7 @@ struct Config {
     bool compute = false;
     bool help = false;
     bool status = true;
+    bool keep_going = false;
     bool session_explicit = false;
     bool restore_explicit = false;
     int attack_mode = 3;
@@ -242,6 +243,7 @@ Options:
                              if --session is not set
       --status / --no-status Enable or disable progress display
       --status-interval N    Progress update interval in seconds
+      --keep-going           Continue scanning after a match to find all matches
   -a 3                       Only attack mode supported
   -m dst                     Only hash mode supported
   -h, --help                 Show this help
@@ -481,6 +483,8 @@ Config parse_args(int argc, char** argv, std::vector<std::string>& positional) {
             cfg.max_len = static_cast<std::size_t>(std::stoull(need_value(arg.c_str())));
         } else if (arg == "--status-interval") {
             cfg.status_interval = static_cast<std::size_t>(std::stoull(need_value(arg.c_str())));
+        } else if (arg == "--keep-going") {
+            cfg.keep_going = true;
         } else if (arg == "-a") {
             cfg.attack_mode = std::stoi(need_value(arg.c_str()));
         } else if (arg == "-m") {
@@ -693,7 +697,7 @@ std::string candidate_for_index(const std::vector<Pattern>& plan, std::uint64_t 
 struct CrackOutcome {
     bool found = false;
     bool interrupted = false;
-    std::string password;
+    std::vector<std::string> passwords;
     std::uint64_t checkpoint = 0;
 };
 
@@ -724,14 +728,14 @@ CrackOutcome crack_target(const TargetEntry& target,
         slot.store(kIdle, std::memory_order_relaxed);
     }
 
-    std::string found_password;
+    std::vector<std::string> found_passwords;
     std::mutex found_mutex;
     std::vector<std::thread> workers;
     workers.reserve(thread_count);
 
     for (std::size_t tid = 0; tid < thread_count; ++tid) {
         workers.emplace_back([&, tid] {
-            while (!g_stop && !found.load(std::memory_order_acquire)) {
+            while (!g_stop && (cfg.keep_going || !found.load(std::memory_order_acquire))) {
                 const std::uint64_t idx = next_index.fetch_add(1, std::memory_order_relaxed);
                 if (idx >= total_work) {
                     break;
@@ -747,11 +751,14 @@ CrackOutcome crack_target(const TargetEntry& target,
                 if (dst::hash_password(candidate, target.user) == target.target) {
                     {
                         std::lock_guard<std::mutex> lock(found_mutex);
-                        if (!found.exchange(true, std::memory_order_acq_rel)) {
-                            found_password = candidate;
+                        found_passwords.push_back(candidate);
+                        if (!cfg.keep_going) {
+                            found.store(true, std::memory_order_release);
                         }
                     }
-                    break;
+                    if (!cfg.keep_going) {
+                        break;
+                    }
                 }
                 current[tid].store(kIdle, std::memory_order_release);
             }
@@ -796,7 +803,7 @@ CrackOutcome crack_target(const TargetEntry& target,
             outcome.interrupted = true;
             break;
         }
-        if (found.load(std::memory_order_acquire)) {
+        if (!cfg.keep_going && found.load(std::memory_order_acquire)) {
             outcome.found = true;
             break;
         }
@@ -846,10 +853,12 @@ CrackOutcome crack_target(const TargetEntry& target,
     }
 
     outcome.checkpoint = checkpoint_from_state();
-    outcome.found = found.load(std::memory_order_acquire);
-    if (outcome.found) {
+    {
         std::lock_guard<std::mutex> lock(found_mutex);
-        outcome.password = found_password;
+        outcome.passwords = found_passwords;
+    }
+    outcome.found = !outcome.passwords.empty();
+    if (outcome.found && !cfg.keep_going) {
         save_state(true, target_index + 1, 0);
     } else if (outcome.interrupted) {
         save_state(false, target_index, outcome.checkpoint);
@@ -889,6 +898,7 @@ CrackOutcome crack_target_metal(const TargetEntry& target,
     const dst::Block8 user_block = dst::ebcdic8(target.user);
     std::vector<dst::Block8> encoded_candidates;
     encoded_candidates.reserve(batch_limit);
+    std::vector<std::string> found_passwords;
 
     auto started = std::chrono::steady_clock::now();
     auto last_status = started;
@@ -922,16 +932,21 @@ CrackOutcome crack_target_metal(const TargetEntry& target,
         }
 
         const std::uint64_t batch_start = processed;
-        std::size_t match_index = 0;
-        const bool found = metal_backend::crack_batch(encoded_candidates, user_block, target.target, match_index);
+        const std::vector<std::size_t> match_indices =
+            metal_backend::crack_batch_matches(encoded_candidates, user_block, target.target);
         processed += batch_count;
 
-        if (found) {
-            outcome.found = true;
-            outcome.password = candidate_for_index(plan, batch_start + match_index);
-            outcome.checkpoint = processed;
-            save_state(true, target_index + 1, 0);
-            break;
+        if (!match_indices.empty()) {
+            for (std::size_t match_index : match_indices) {
+                found_passwords.push_back(candidate_for_index(plan, batch_start + match_index));
+            }
+            if (!cfg.keep_going) {
+                outcome.found = true;
+                outcome.passwords = found_passwords;
+                outcome.checkpoint = processed;
+                save_state(true, target_index + 1, 0);
+                break;
+            }
         }
 
         const auto now = std::chrono::steady_clock::now();
@@ -972,7 +987,9 @@ CrackOutcome crack_target_metal(const TargetEntry& target,
     }
 
     outcome.checkpoint = processed;
-    if (outcome.found) {
+    outcome.passwords = found_passwords;
+    outcome.found = !outcome.passwords.empty();
+    if (outcome.found && !cfg.keep_going) {
         save_state(true, target_index + 1, 0);
     } else if (outcome.interrupted) {
         save_state(false, target_index, processed);
@@ -1226,6 +1243,7 @@ int main(int argc, char** argv) {
         }
 
         bool any_cracked = false;
+        std::size_t total_matches = 0;
         save_session_state(session_path,
                            cfg,
                            fingerprint,
@@ -1271,7 +1289,10 @@ int main(int argc, char** argv) {
 
             if (current_outcome.found) {
                 any_cracked = true;
-                std::cout << target.user << ':' << current_outcome.password << " -> " << target.target_hex << '\n';
+                total_matches += current_outcome.passwords.size();
+                for (const auto& password : current_outcome.passwords) {
+                    std::cout << target.user << ':' << password << " -> " << target.target_hex << '\n';
+                }
             } else {
                 std::cout << target.user << ':' << target.target_hex << " -> not found\n";
             }
@@ -1280,7 +1301,11 @@ int main(int argc, char** argv) {
         const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - run_started).count();
         const double average_rate = total_work / std::max(elapsed, 0.001);
         std::cerr << "finished in " << format_duration(elapsed)
-                  << " (" << format_rate(average_rate) << " c/s average)\n";
+                  << " (" << format_rate(average_rate) << " c/s average";
+        if (total_matches > 0) {
+            std::cerr << ", " << total_matches << " match" << (total_matches == 1 ? "" : "es");
+        }
+        std::cerr << ")\n";
 
         if (!any_cracked) {
             std::cout << "no match in " << format_number(total_work) << " candidates\n";
