@@ -11,5 +11,6 @@
 - Use the Metal path to batch encoded candidates through the GPU; keep CPU cracking as the fallback engine.
 - Print a final elapsed-time summary when a cracking run finishes or is interrupted.
 - Support `--keep-going` to continue through the whole keyspace and report every match.
+- When `--keep-going` is set, stream each match line immediately as it is discovered.
 - Prefer small, reviewable changes with verification after each feature.
 - Preserve user-created working notes unless the user asks to track them.

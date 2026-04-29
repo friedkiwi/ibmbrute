@@ -701,6 +701,12 @@ struct CrackOutcome {
     std::uint64_t checkpoint = 0;
 };
 
+void emit_match_line(const std::string& user, const std::string& password, const std::string& target_hex) {
+    static std::mutex output_mutex;
+    std::lock_guard<std::mutex> lock(output_mutex);
+    std::cout << user << ':' << password << " -> " << target_hex << '\n' << std::flush;
+}
+
 CrackOutcome crack_target(const TargetEntry& target,
                           const std::vector<Pattern>& plan,
                           const Config& cfg,
@@ -752,6 +758,9 @@ CrackOutcome crack_target(const TargetEntry& target,
                     {
                         std::lock_guard<std::mutex> lock(found_mutex);
                         found_passwords.push_back(candidate);
+                        if (cfg.keep_going) {
+                            emit_match_line(target.user, candidate, target.target_hex);
+                        }
                         if (!cfg.keep_going) {
                             found.store(true, std::memory_order_release);
                         }
@@ -938,7 +947,11 @@ CrackOutcome crack_target_metal(const TargetEntry& target,
 
         if (!match_indices.empty()) {
             for (std::size_t match_index : match_indices) {
-                found_passwords.push_back(candidate_for_index(plan, batch_start + match_index));
+                const std::string password = candidate_for_index(plan, batch_start + match_index);
+                found_passwords.push_back(password);
+                if (cfg.keep_going) {
+                    emit_match_line(target.user, password, target.target_hex);
+                }
             }
             if (!cfg.keep_going) {
                 outcome.found = true;
@@ -1290,8 +1303,10 @@ int main(int argc, char** argv) {
             if (current_outcome.found) {
                 any_cracked = true;
                 total_matches += current_outcome.passwords.size();
-                for (const auto& password : current_outcome.passwords) {
-                    std::cout << target.user << ':' << password << " -> " << target.target_hex << '\n';
+                if (!cfg.keep_going) {
+                    for (const auto& password : current_outcome.passwords) {
+                        std::cout << target.user << ':' << password << " -> " << target.target_hex << '\n';
+                    }
                 }
             } else {
                 std::cout << target.user << ':' << target.target_hex << " -> not found\n";
