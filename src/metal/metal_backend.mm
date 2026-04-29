@@ -212,8 +212,8 @@ inline ulong des_encrypt(ulong key, ulong block)
     return permute(preoutput, FP, 64, 64);
 }
 
-kernel void dst_kernel(const device uchar* keys [[buffer(0)]],
-                       const device uchar* user [[buffer(1)]],
+kernel void dst_kernel(const device uchar* passwords [[buffer(0)]],
+                       const device uchar* user_key [[buffer(1)]],
                        const device uchar* target [[buffer(2)]],
                        device uint* matches [[buffer(3)]],
                        constant uint& count [[buffer(4)]],
@@ -223,10 +223,10 @@ kernel void dst_kernel(const device uchar* keys [[buffer(0)]],
         return;
     }
 
-    const ulong key = load_be64(keys + (gid * 8));
-    const ulong user_block = load_be64(user);
+    const ulong key = load_be64(user_key);
+    const ulong password_block = load_be64(passwords + (gid * 8));
     const ulong target_block = load_be64(target);
-    const ulong hash = des_encrypt(key, user_block);
+    const ulong hash = des_encrypt(key, password_block);
     matches[gid] = hash == target_block ? 1u : 0u;
 }
 )metal";
@@ -360,7 +360,7 @@ std::size_t batch_size()
 }
 
 std::vector<std::size_t> crack_batch_matches(const std::vector<dst::Block8>& encoded_passwords,
-                                             const dst::Block8& user,
+                                             const dst::Block8& user_key,
                                              const dst::Block8& target)
 {
     MetalState& s = state();
@@ -382,8 +382,8 @@ std::vector<std::size_t> crack_batch_matches(const std::vector<dst::Block8>& enc
         id<MTLBuffer> key_buffer = [s.device newBufferWithBytes:encoded_passwords.data()
                                                          length:key_bytes
                                                         options:MTLResourceStorageModeShared];
-        id<MTLBuffer> user_buffer = [s.device newBufferWithBytes:user.data()
-                                                         length:user.size()
+        id<MTLBuffer> user_buffer = [s.device newBufferWithBytes:user_key.data()
+                                                         length:user_key.size()
                                                         options:MTLResourceStorageModeShared];
         id<MTLBuffer> target_buffer = [s.device newBufferWithBytes:target.data()
                                                            length:target.size()

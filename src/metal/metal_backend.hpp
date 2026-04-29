@@ -14,7 +14,7 @@ bool available();
 std::string device_description();
 std::size_t batch_size();
 std::vector<std::size_t> crack_batch_matches(const std::vector<dst::Block8>& encoded_passwords,
-                                             const dst::Block8& user,
+                                             const dst::Block8& user_key,
                                              const dst::Block8& target);
 
 }  // namespace metal_backend
