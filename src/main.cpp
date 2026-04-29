@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -96,6 +97,8 @@ struct Config {
     bool compute = false;
     bool help = false;
     bool status = true;
+    bool session_explicit = false;
+    bool restore_explicit = false;
     int attack_mode = 3;
     std::string mode = "dst";
     std::string user;
@@ -207,7 +210,9 @@ Options:
       --min-length N         Minimum length when no mask is supplied
       --max-length N         Maximum length when no mask is supplied
       --session FILE         Save resume state to FILE
-      --restore FILE         Resume from FILE
+                             Auto-generated if omitted
+      --restore FILE         Resume from FILE and save back to it
+                             if --session is not set
       --status / --no-status Enable or disable progress display
       --status-interval N    Progress update interval in seconds
   -a 3                       Only attack mode supported
@@ -221,6 +226,7 @@ struct ResumeData {
     std::string user;
     std::string target_hex;
     std::string hashfile_path;
+    std::string fingerprint;
     std::string charset;
     std::string mask;
     std::string custom1;
@@ -231,8 +237,67 @@ struct ResumeData {
     std::size_t max_len = 0;
     std::size_t target_index = 0;
     std::uint64_t position = 0;
+    bool complete = false;
     bool compute = false;
 };
+
+ResumeData to_resume(const Config& cfg, const std::string& fingerprint, std::uint64_t position);
+
+std::uint64_t fnv1a64(std::string_view text, std::uint64_t seed = 1469598103934665603ull) {
+    std::uint64_t hash = seed;
+    for (unsigned char ch : text) {
+        hash ^= ch;
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+std::string hex_u64(std::uint64_t value) {
+    static constexpr char digits[] = "0123456789ABCDEF";
+    std::string out(16, '0');
+    for (int i = 15; i >= 0; --i) {
+        out[static_cast<std::size_t>(i)] = digits[value & 0x0f];
+        value >>= 4;
+    }
+    return out;
+}
+
+std::string file_signature(const std::string& path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(path, ec)) {
+        return "missing";
+    }
+
+    const auto size = fs::file_size(path, ec);
+    const auto stamp = fs::last_write_time(path, ec);
+    const auto stamp_count = ec ? 0 : stamp.time_since_epoch().count();
+    return std::to_string(static_cast<unsigned long long>(size)) + ":" +
+           std::to_string(static_cast<long long>(stamp_count));
+}
+
+std::string session_fingerprint(const Config& cfg) {
+    std::ostringstream seed;
+    seed << "mode=" << cfg.mode << '\n'
+         << "user=" << cfg.user << '\n'
+         << "target=" << cfg.target_hex << '\n'
+         << "hashfile=" << cfg.hashfile_path << '\n'
+         << "hashfile_sig=" << file_signature(cfg.hashfile_path) << '\n'
+         << "charset=" << cfg.charset << '\n'
+         << "mask=" << cfg.mask << '\n'
+         << "c1=" << cfg.custom1 << '\n'
+         << "c2=" << cfg.custom2 << '\n'
+         << "c3=" << cfg.custom3 << '\n'
+         << "c4=" << cfg.custom4 << '\n'
+         << "min_len=" << cfg.min_len << '\n'
+         << "max_len=" << cfg.max_len << '\n'
+         << "attack=" << cfg.attack_mode;
+    return hex_u64(fnv1a64(seed.str()));
+}
+
+std::string default_session_path(const Config& cfg) {
+    return ".ibmbrute-" + session_fingerprint(cfg) + ".session";
+}
 
 void write_kv(std::ostream& out, const char* key, const std::string& value) {
     out << key << '=' << value << '\n';
@@ -256,6 +321,7 @@ void save_resume(const std::string& path, const ResumeData& data) {
     write_kv(out, "user", data.user);
     write_kv(out, "target", data.target_hex);
     write_kv(out, "hashfile", data.hashfile_path);
+    write_kv(out, "fingerprint", data.fingerprint);
     write_kv(out, "charset", data.charset);
     write_kv(out, "mask", data.mask);
     write_kv(out, "custom1", data.custom1);
@@ -266,6 +332,7 @@ void save_resume(const std::string& path, const ResumeData& data) {
     write_kv(out, "max_len", data.max_len);
     write_kv(out, "target_index", data.target_index);
     write_kv(out, "position", data.position);
+    write_kv(out, "complete", static_cast<std::size_t>(data.complete ? 1 : 0));
     write_kv(out, "compute", static_cast<std::size_t>(data.compute ? 1 : 0));
 }
 
@@ -301,6 +368,7 @@ ResumeData load_resume(const std::string& path) {
     data.user = get("user");
     data.target_hex = get("target");
     data.hashfile_path = get("hashfile");
+    data.fingerprint = get("fingerprint");
     data.charset = get("charset");
     data.mask = get("mask");
     data.custom1 = get("custom1");
@@ -311,6 +379,7 @@ ResumeData load_resume(const std::string& path) {
     data.max_len = static_cast<std::size_t>(std::stoull(get("max_len", "0")));
     data.target_index = static_cast<std::size_t>(std::stoull(get("target_index", "0")));
     data.position = std::stoull(get("position", "0"));
+    data.complete = std::stoull(get("complete", "0")) != 0;
     data.compute = std::stoull(get("compute", "0")) != 0;
     return data;
 }
@@ -358,8 +427,10 @@ Config parse_args(int argc, char** argv, std::vector<std::string>& positional) {
             cfg.custom4 = need_value(arg.c_str());
         } else if (arg == "--session") {
             cfg.session_path = need_value(arg.c_str());
+            cfg.session_explicit = true;
         } else if (arg == "--restore") {
             cfg.restore_path = need_value(arg.c_str());
+            cfg.restore_explicit = true;
         } else if (arg == "--min-length") {
             cfg.min_len = static_cast<std::size_t>(std::stoull(need_value(arg.c_str())));
         } else if (arg == "--max-length") {
@@ -494,6 +565,62 @@ std::vector<TargetEntry> load_targets(const Config& cfg) {
     return targets;
 }
 
+bool session_file_exists(const std::string& path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    return fs::exists(path, ec);
+}
+
+bool session_should_resume(const ResumeData& resume,
+                           const Config& cfg,
+                           const std::string& fingerprint) {
+    if (resume.complete) {
+        return false;
+    }
+    if (!resume.fingerprint.empty() && resume.fingerprint != fingerprint) {
+        return false;
+    }
+    if (!resume.hashfile_path.empty() && !cfg.hashfile_path.empty() &&
+        resume.hashfile_path != cfg.hashfile_path) {
+        return false;
+    }
+    if (!resume.target_hex.empty() && !cfg.target_hex.empty() && resume.target_hex != cfg.target_hex) {
+        return false;
+    }
+    return true;
+}
+
+std::string resolve_session_path(Config& cfg) {
+    if (cfg.session_path.empty()) {
+        if (!cfg.restore_path.empty()) {
+            cfg.session_path = cfg.restore_path;
+        } else {
+            cfg.session_path = default_session_path(cfg);
+        }
+    }
+    return cfg.session_path;
+}
+
+void save_session_state(const std::string& path,
+                        const Config& cfg,
+                        const std::string& fingerprint,
+                        std::size_t target_index,
+                        std::uint64_t position,
+                        bool complete,
+                        const std::string& user = std::string(),
+                        const std::string& target_hex = std::string()) {
+    ResumeData data = to_resume(cfg, fingerprint, position);
+    data.target_index = target_index;
+    data.complete = complete;
+    if (!user.empty()) {
+        data.user = user;
+    }
+    if (!target_hex.empty()) {
+        data.target_hex = target_hex;
+    }
+    save_resume(path, data);
+}
+
 std::vector<Pattern> build_plan_from_config(const Config& cfg) {
     if (!cfg.mask.empty()) {
         return build_plan_from_mask(cfg.mask, cfg.custom1, cfg.custom2, cfg.custom3, cfg.custom4);
@@ -501,12 +628,13 @@ std::vector<Pattern> build_plan_from_config(const Config& cfg) {
     return build_plan_from_lengths(builtin_charset(cfg.charset), cfg.min_len, cfg.max_len);
 }
 
-ResumeData to_resume(const Config& cfg, std::uint64_t position) {
+ResumeData to_resume(const Config& cfg, const std::string& fingerprint, std::uint64_t position) {
     ResumeData data;
     data.mode = cfg.mask.empty() ? "lengths" : "mask";
     data.user = cfg.user;
     data.target_hex = cfg.target_hex;
     data.hashfile_path = cfg.hashfile_path;
+    data.fingerprint = fingerprint;
     data.charset = builtin_charset(cfg.charset);
     data.mask = cfg.mask;
     data.custom1 = cfg.custom1;
@@ -517,6 +645,7 @@ ResumeData to_resume(const Config& cfg, std::uint64_t position) {
     data.max_len = cfg.max_len;
     data.target_index = 0;
     data.position = position;
+    data.complete = false;
     data.compute = cfg.compute;
     return data;
 }
@@ -572,17 +701,6 @@ int main(int argc, char** argv) {
             cfg.compute = restored.compute;
         }
 
-        if (cfg.hashfile_path.empty() && cfg.target_hex.empty() && !cfg.compute) {
-            if (positional.empty()) {
-                throw std::runtime_error("missing target hash");
-            }
-            cfg.target_hex = positional.front();
-        }
-
-        if (!cfg.hashfile_path.empty() && !cfg.target_hex.empty()) {
-            throw std::runtime_error("use either --hashfile or --target, not both");
-        }
-
         if (cfg.compute) {
             if (!cfg.hashfile_path.empty()) {
                 throw std::runtime_error("--compute is not compatible with --hashfile");
@@ -598,6 +716,19 @@ int main(int argc, char** argv) {
             return 0;
         }
 
+        if (cfg.hashfile_path.empty() && cfg.target_hex.empty()) {
+            if (positional.empty()) {
+                throw std::runtime_error("missing target hash");
+            }
+            cfg.target_hex = positional.front();
+        }
+
+        if (!cfg.hashfile_path.empty() && !cfg.target_hex.empty()) {
+            throw std::runtime_error("use either --hashfile or --target, not both");
+        }
+
+        const std::string fingerprint = session_fingerprint(cfg);
+        const std::string session_path = resolve_session_path(cfg);
         const auto plan = build_plan_from_config(cfg);
         const auto targets = load_targets(cfg);
 
@@ -614,10 +745,18 @@ int main(int argc, char** argv) {
 
         std::size_t start_target_index = 0;
         std::uint64_t start_position = 0;
-        if (!cfg.restore_path.empty()) {
-            const ResumeData restored = load_resume(cfg.restore_path);
-            start_target_index = restored.target_index;
-            start_position = restored.position;
+        bool resumed_session = false;
+        if (session_file_exists(session_path)) {
+            const ResumeData restored = load_resume(session_path);
+            if (session_should_resume(restored, cfg, fingerprint)) {
+                if (restored.target_index < targets.size()) {
+                    start_target_index = restored.target_index;
+                    start_position = restored.position;
+                    resumed_session = true;
+                }
+            } else if (!restored.complete && (cfg.session_explicit || cfg.restore_explicit)) {
+                throw std::runtime_error("existing session file is incompatible with current input");
+            }
         }
 
         if (start_target_index > targets.size()) {
@@ -638,7 +777,24 @@ int main(int argc, char** argv) {
         std::uint64_t processed = static_cast<std::uint64_t>(start_target_index) * per_target_total + start_position;
         auto started = std::chrono::steady_clock::now();
         auto last_status = started;
+        auto last_save = started;
         bool any_cracked = false;
+
+        if (resumed_session) {
+            std::cerr << "resuming session: " << session_path
+                      << " target=" << (start_target_index + 1) << '/' << targets.size()
+                      << " position=" << start_position << '\n';
+        }
+
+        const TargetEntry* initial_target = targets.empty() ? nullptr : &targets[start_target_index < targets.size() ? start_target_index : targets.size() - 1];
+        save_session_state(session_path,
+                           cfg,
+                           fingerprint,
+                           start_target_index,
+                           start_position,
+                           false,
+                           initial_target ? initial_target->user : std::string(),
+                           initial_target ? initial_target->target_hex : std::string());
 
         for (std::size_t target_index = start_target_index; target_index < targets.size(); ++target_index) {
             const auto& target = targets[target_index];
@@ -658,13 +814,14 @@ int main(int argc, char** argv) {
                 local_position = 0;
                 for (std::uint64_t idx = begin; idx < pattern.total; ++idx) {
                     if (g_stop) {
-                        if (!cfg.session_path.empty()) {
-                            ResumeData resume = to_resume(cfg, global_position + idx + 1);
-                            resume.target_index = target_index;
-                            resume.target_hex = target.target_hex;
-                            resume.user = target.user;
-                            save_resume(cfg.session_path, resume);
-                        }
+                        save_session_state(session_path,
+                                           cfg,
+                                           fingerprint,
+                                           target_index,
+                                           global_position + idx + 1,
+                                           false,
+                                           target.user,
+                                           target.target_hex);
                         std::cerr << "\ninterrupted, session saved if configured\n";
                         return 130;
                     }
@@ -677,18 +834,31 @@ int main(int argc, char** argv) {
                         found_password = candidate;
                         any_cracked = true;
                         std::cout << target.user << ':' << found_password << " -> " << target.target_hex << '\n';
-                        if (!cfg.session_path.empty()) {
-                            ResumeData resume = to_resume(cfg, 0);
-                            resume.target_index = target_index + 1;
-                            resume.target_hex = target.target_hex;
-                            resume.user = target.user;
-                            save_resume(cfg.session_path, resume);
-                        }
+                        save_session_state(session_path,
+                                           cfg,
+                                           fingerprint,
+                                           target_index + 1,
+                                           0,
+                                           true,
+                                           target.user,
+                                           target.target_hex);
                         break;
                     }
 
                     const auto now = std::chrono::steady_clock::now();
                     const double elapsed = std::chrono::duration<double>(now - started).count();
+                    const auto save_elapsed = std::chrono::duration<double>(now - last_save).count();
+                    if (save_elapsed >= static_cast<double>(cfg.status_interval)) {
+                        save_session_state(session_path,
+                                           cfg,
+                                           fingerprint,
+                                           target_index,
+                                           global_position + idx + 1,
+                                           false,
+                                           target.user,
+                                           target.target_hex);
+                        last_save = now;
+                    }
                     if (cfg.status && elapsed >= static_cast<double>(cfg.status_interval) &&
                         now - last_status >= std::chrono::seconds(static_cast<int>(cfg.status_interval))) {
                         const double rate = processed / std::max(elapsed, 0.001);
@@ -711,6 +881,16 @@ int main(int argc, char** argv) {
                 }
             }
 
+            if (!found) {
+                save_session_state(session_path,
+                                   cfg,
+                                   fingerprint,
+                                   target_index + 1,
+                                   0,
+                                   false,
+                                   target.user,
+                                   target.target_hex);
+            }
             if (cfg.status) {
                 std::cerr << '\r' << std::string(140, ' ') << '\r';
             }
@@ -720,6 +900,7 @@ int main(int argc, char** argv) {
             }
         }
 
+        save_session_state(session_path, cfg, fingerprint, targets.size(), 0, true);
         if (!any_cracked) {
             std::cout << "no match in " << format_number(total_work) << " candidates\n";
             return 1;
