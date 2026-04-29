@@ -243,7 +243,13 @@ struct MetalState {
         @autoreleasepool {
             device = MTLCreateSystemDefaultDevice();
             if (device == nil) {
-                error = "no Metal device available";
+                NSArray<id<MTLDevice>>* devices = MTLCopyAllDevices();
+                if (devices != nil && [devices count] > 0) {
+                    device = [devices objectAtIndex:0];
+                }
+            }
+            if (device == nil) {
+                error = "no Metal devices found";
                 initialized = true;
                 return;
             }
@@ -323,7 +329,7 @@ bool compiled()
 
 bool available()
 {
-    return state().ready();
+    return state().device != nil;
 }
 
 std::string device_description()

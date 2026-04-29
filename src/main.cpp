@@ -1149,7 +1149,8 @@ int main(int argc, char** argv) {
             throw std::runtime_error("unknown engine: " + cfg.engine);
         }
         if (cfg.engine == "metal" && !metal_backend::available()) {
-            throw std::runtime_error("metal engine requested but Metal is not available at runtime");
+            throw std::runtime_error("metal engine requested but Metal is not available at runtime: " +
+                                     metal_backend::device_description());
         }
 
         if (cfg.hashfile_path.empty() && cfg.target_hex.empty()) {
