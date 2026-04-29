@@ -631,6 +631,19 @@ std::size_t resolve_thread_count(const Config& cfg) {
     return detect_cpu_cores();
 }
 
+std::string engine_banner(const Config& cfg, std::size_t thread_count) {
+    if (thread_count == 1) {
+        return "engine: single-threaded cracker (1 thread)";
+    }
+    std::ostringstream oss;
+    if (cfg.mt_explicit) {
+        oss << "engine: multithreaded cracker (explicit, " << thread_count << " threads)";
+    } else {
+        oss << "engine: multithreaded cracker (default, spawned " << thread_count << " threads)";
+    }
+    return oss.str();
+}
+
 std::uint64_t total_candidates(const std::vector<Pattern>& plan) {
     std::uint64_t total = 0;
     for (const auto& pattern : plan) {
@@ -1024,6 +1037,8 @@ int main(int argc, char** argv) {
         if (thread_count == 0) {
             throw std::runtime_error("thread count resolved to zero");
         }
+
+        std::cerr << engine_banner(cfg, thread_count) << '\n';
 
         std::uint64_t total_work = per_target_total;
         if (targets.size() > 1) {
