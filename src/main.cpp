@@ -124,7 +124,7 @@ struct Config {
     int attack_mode = 3;
     bool mt_explicit = false;
     std::size_t mt_threads = 0;
-    std::string engine = "mt";
+    std::string engine = "auto";
     std::string mode = "dst";
     std::string user;
     std::string target_hex;
@@ -640,27 +640,36 @@ std::size_t resolve_thread_count(const Config& cfg) {
     return detect_cpu_cores();
 }
 
-std::string engine_banner(const Config& cfg, std::size_t thread_count) {
+std::string engine_banner(std::string_view requested_engine, const Config& cfg, std::size_t thread_count) {
     std::ostringstream oss;
     if (cfg.engine == "metal") {
-        oss << "engine: metal";
+        oss << "engine: metal (" << (requested_engine == "auto" ? "auto-selected" : "selected by CLI");
         if (metal_backend::compiled()) {
-            oss << " (selected, CPU fallback threads=" << thread_count << ")";
+            oss << "; TODO: implement metal; CPU fallback threads=" << thread_count << ")";
         } else {
-            oss << " (selected, but Metal is not compiled in)";
+            oss << "; but Metal is not compiled in)";
         }
     } else if (thread_count == 1) {
         oss << "engine: single-threaded CPU cracker (1 thread)";
     } else if (cfg.mt_explicit) {
-        oss << "engine: multithreaded CPU cracker (explicit, " << thread_count << " threads)";
+        oss << "engine: multithreaded CPU cracker (selected by CLI, " << thread_count << " threads)";
+    } else if (requested_engine == "auto") {
+        oss << "engine: multithreaded CPU cracker (auto-selected fallback, spawned " << thread_count << " threads)";
     } else {
-        oss << "engine: multithreaded CPU cracker (default, spawned " << thread_count << " threads)";
+        oss << "engine: multithreaded CPU cracker (selected by CLI, spawned " << thread_count << " threads)";
     }
     return oss.str();
 }
 
 std::string metal_banner() {
     return std::string("metal: ") + metal_backend::device_description();
+}
+
+std::string resolve_engine(const Config& cfg) {
+    if (cfg.engine == "auto") {
+        return metal_backend::compiled() ? std::string("metal") : std::string("mt");
+    }
+    return cfg.engine;
 }
 
 std::uint64_t total_candidates(const std::vector<Pattern>& plan) {
@@ -1012,6 +1021,10 @@ int main(int argc, char** argv) {
             return 0;
         }
 
+        const std::string requested_engine = cfg.engine;
+        const std::string resolved_engine = resolve_engine(cfg);
+        cfg.engine = resolved_engine;
+
         if (cfg.engine != "mt" && cfg.engine != "metal") {
             throw std::runtime_error("unknown engine: " + cfg.engine);
         }
@@ -1068,7 +1081,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("thread count resolved to zero");
         }
 
-        std::cerr << engine_banner(cfg, thread_count) << '\n';
+        std::cerr << engine_banner(requested_engine, cfg, thread_count) << '\n';
         std::cerr << metal_banner() << '\n';
 
         std::uint64_t total_work = per_target_total;
