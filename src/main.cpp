@@ -133,7 +133,7 @@ struct Config {
     std::string session_path;
     std::string restore_path;
     std::string hashfile_path;
-    std::string charset = "ibm";
+    std::string charset = "full";
     std::string mask;
     std::string custom1;
     std::string custom2;
@@ -145,11 +145,24 @@ struct Config {
 };
 
 std::string builtin_charset(std::string_view name) {
-    if (name == "ibm") {
-        return "ABDFHKMOQSUWY02468AJ#@$_";
-    }
     if (name == "full") {
+        // Full 40-char DST alphabet: A-Z plus 0-9 plus the four EBCDIC-mappable
+        // symbols (#, @, $, _) that the SST/DST password validator accepts.
+        // This is the default and recovers the operator's literal plaintext.
         return "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#@$_";
+    }
+    if (name == "ibm") {
+        // 23-char DES-distinct canonical alphabet: one ASCII rep per cp037
+        // EBCDIC LSB-pair class, plus the 6 singletons (A J # @ $ _).
+        // 17 LSB-pair reps (alphabetically-first of each pair) + 6 singletons
+        // = 23 distinct DES-effective key bytes per position.  Search space
+        // is 23^8 instead of 40^8 (80x smaller, ~80x faster), but the recovered
+        // plaintext is the canonical equivalent of the operator's password,
+        // not the original (e.g. "QSECOFR" recovers as "QSDBOFQ" because Q/R,
+        // E/D, C/B all collide under DES key-schedule parity stripping).
+        // Useful for V4R5 hashes where any equivalence-class member
+        // authenticates.  Not useful for V3R2, which appears parity-sensitive.
+        return "ABDFHJKMOQSUWY02468#@$_";
     }
     return std::string(name);
 }
@@ -232,7 +245,13 @@ Options:
       --mt N                 Number of cracking threads; default is CPU cores
       --engine NAME         Cracking engine: mt, metal, or auto
       --charset NAME|TEXT    Charset for length-based brute force
-                             Built-ins: ibm, full
+                             Built-ins:
+                               full (default) - all 40 DST-valid chars,
+                                 recovers literal plaintext, 23^8 / 40^8
+                                 = ~1/80 the rate of the canonical search
+                               ibm            - 23-char DES-distinct subset,
+                                 ~80x faster but returns canonical equivalent
+                                 (only safe on V4R5 where parity is stripped)
       --mask MASK            Hashcat-style mask with ?1.. ?4 placeholders
   -1, -2, -3, -4 TEXT        Charsets used by mask placeholders
       --min-length N         Minimum length when no mask is supplied
@@ -342,10 +361,11 @@ void write_kv(std::ostream& out, const char* key, const std::string& value) {
     out << key << '=' << value << '\n';
 }
 
-void write_kv(std::ostream& out, const char* key, std::size_t value) {
-    out << key << '=' << value << '\n';
-}
-
+// Single integer overload covers both size_t and uint64_t.  Previously two
+// overloads with the same body were defined, which collides on platforms
+// where std::size_t and std::uint64_t are the same underlying type (Linux
+// x86_64 gcc).  std::ostream's built-in formatter handles both numeric
+// types via implicit conversion; output is identical.
 void write_kv(std::ostream& out, const char* key, std::uint64_t value) {
     out << key << '=' << value << '\n';
 }
@@ -504,31 +524,81 @@ bool verify_note_vectors() {
         std::string user;
         std::string expected;
     };
-    const std::vector<Vector> vectors = {
+
+    // (1) Symmetric IBM-default vectors recovered from on-disk dumps in
+    //     findings.md.  These pass under EITHER orientation of the formula,
+    //     so they're necessary but not sufficient.
+    const std::vector<Vector> symmetric_vectors = {
         {"11111111", "11111111", "5D1B8FAF7839494B"},
         {"22222222", "22222222", "1C0A9280EECF5D48"},
-        {"QSRV", "QSRV", "DC3FD085A03F9D16"},
-        {"QSECOFR", "QSECOFR", "909495FE947D2D7E"},
+        {"QSRV",     "QSRV",     "DC3FD085A03F9D16"},
+        {"QSECOFR",  "QSECOFR",  "909495FE947D2D7E"},
     };
+
+    // (2) Asymmetric vectors computed offline against the corrected formula
+    //     hash = DES(key=ebcdic8(user_id), plaintext=ebcdic8(password)).
+    //     These DO disambiguate the orientation: the prior backwards
+    //     hash_password() would not match any of these.
+    const std::vector<Vector> asymmetric_vectors = {
+        {"ABC",      "QSECOFR",  "D6809A2DF4A8EBC5"},
+        {"PASSWORD", "QSECOFR",  "787715032A6E97BF"},
+        {"HELLO",    "QSRV",     "0674F69C0E19144E"},
+        {"AB",       "11111111", "4719F5B35DF10E9A"},
+        {"X",        "QSECOFR",  "12B7CF46E893820A"},
+    };
+
     bool ok = true;
-    for (const auto& v : vectors) {
+    for (const auto& v : symmetric_vectors) {
         const auto actual = dst::hex_encode(dst::hash_password(v.password, v.user));
         if (actual != v.expected) {
             ok = false;
-            std::cerr << "mismatch: " << v.password << '/' << v.user
+            std::cerr << "symmetric mismatch: " << v.password << '/' << v.user
                       << " expected " << v.expected << " got " << actual << '\n';
         } else {
-            std::cout << v.user << ':' << v.password << " -> " << actual << '\n';
+            std::cout << "symmetric  " << v.user << ':' << v.password << " -> " << actual << '\n';
         }
     }
-    const auto qsrv = dst::hex_encode(dst::hash_password("QSRV", "QSRV"));
-    const auto qsqu = dst::hex_encode(dst::hash_password("QSQU", "QSRV"));
-    if (qsrv != qsqu) {
-        ok = false;
-        std::cerr << "equivalence check failed: QSRV and QSQU should collide, got "
-                  << qsrv << " vs " << qsqu << '\n';
-    } else {
-        std::cout << "equivalence check: QSRV == QSQU -> " << qsrv << '\n';
+    for (const auto& v : asymmetric_vectors) {
+        const auto actual = dst::hex_encode(dst::hash_password(v.password, v.user));
+        if (actual != v.expected) {
+            ok = false;
+            std::cerr << "asymmetric mismatch: " << v.password << '/' << v.user
+                      << " expected " << v.expected << " got " << actual << '\n';
+        } else {
+            std::cout << "asymmetric " << v.user << ':' << v.password << " -> " << actual << '\n';
+        }
+    }
+
+    // (3) Parity behaviour under the corrected formula:
+    //     - LSB-equivalent passwords MUST produce DIFFERENT hashes (the password is
+    //       the DES plaintext, no PC-1, every bit significant).
+    //     - LSB-equivalent user-ids MUST produce IDENTICAL hashes (the user-id is
+    //       the DES key, PC-1 strips LSBs).
+    {
+        const auto qsecofr = dst::hex_encode(dst::hash_password("QSECOFR", "QSECOFR"));
+        const auto qsdbofq = dst::hex_encode(dst::hash_password("QSDBOFQ", "QSECOFR"));
+        if (qsecofr == qsdbofq) {
+            ok = false;
+            std::cerr << "parity check (password side) FAILED: 'QSECOFR' and 'QSDBOFQ' as passwords "
+                         "for fixed user_id 'QSECOFR' produced the same hash (" << qsecofr << "). "
+                         "This means hash_password() is using the OLD backwards orientation.\n";
+        } else {
+            std::cout << "parity check (password side OK): "
+                      << "QSECOFR/QSECOFR=" << qsecofr << "  vs  QSDBOFQ/QSECOFR=" << qsdbofq << "\n";
+        }
+    }
+    {
+        const auto pwd_uid_qsecofr = dst::hex_encode(dst::hash_password("QSECOFR", "QSECOFR"));
+        const auto pwd_uid_qsdbofq = dst::hex_encode(dst::hash_password("QSECOFR", "QSDBOFQ"));
+        if (pwd_uid_qsecofr != pwd_uid_qsdbofq) {
+            ok = false;
+            std::cerr << "parity check (user_id side) FAILED: user_ids 'QSECOFR' and 'QSDBOFQ' "
+                         "should both produce the same key after PC-1, but hashes differ ("
+                      << pwd_uid_qsecofr << " vs " << pwd_uid_qsdbofq << ").\n";
+        } else {
+            std::cout << "parity check (user_id side OK): "
+                      << "user_id 'QSECOFR' and 'QSDBOFQ' both yield " << pwd_uid_qsecofr << "\n";
+        }
     }
     return ok;
 }

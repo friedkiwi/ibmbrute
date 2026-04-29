@@ -25,6 +25,15 @@ inline bool compiled() {
     return false;
 }
 
+// Required by callers that ask "is the Metal engine usable right now?"  The
+// real (Apple) implementation answers from the live device list.  The stub
+// always reports false so resolve_engine() falls back to the multithreaded
+// CPU path on non-Apple hosts.  Without this stub the program failed to
+// link on Linux and Windows.
+inline bool available() {
+    return false;
+}
+
 inline std::string device_description() {
     return "Metal support not compiled in";
 }

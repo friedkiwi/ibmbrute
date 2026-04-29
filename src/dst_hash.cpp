@@ -294,9 +294,19 @@ Block8 ebcdic8(const std::string& ascii) {
     return out;
 }
 
+// Corrected DST hash:  hash = DES_ECB(key=ebcdic8(user_id), plaintext=ebcdic8(password)).
+//
+// This orientation was originally documented backwards in findings.md.  All
+// four IBM-default calibration pairs (QSECOFR/QSECOFR, QSRV/QSRV, etc.) had
+// password == user_id, so DES's asymmetry between key and plaintext was
+// invisible.  The error surfaced when sign-on on a real OS/400 rejected
+// "QSDBOFQ" (a parity-equivalent of QSECOFR's password under PC-1) even
+// though the prior formula said both should collide.  Under the corrected
+// formula the password is the DES plaintext: every bit is significant, no
+// LSB equivalence class, recovered plaintext is the literal operator input.
 Block8 hash_password(const std::string& password, const std::string& user_id) {
-    const Block8 key = ebcdic8(password);
-    const Block8 block = ebcdic8(user_id);
+    const Block8 key = ebcdic8(user_id);
+    const Block8 block = ebcdic8(password);
     const auto round_keys = build_round_keys(key);
 
     std::uint64_t state = load_be64(block);
