@@ -164,9 +164,9 @@ inline ulong rotate_left_28(ulong value, uint shift)
     return ((value << shift) | (value >> (28 - shift))) & 0x0ffffffful;
 }
 
-inline uint feistel(uint half, thread const ulong* round_keys, uint round)
+inline uint feistel(uint value, thread const ulong* round_keys, uint round)
 {
-    const ulong expanded = permute((ulong)half << 32, E, 48, 64);
+    const ulong expanded = permute((ulong)value << 32, E, 48, 64);
     const ulong mixed = expanded ^ round_keys[round];
 
     uint substituted = 0;
