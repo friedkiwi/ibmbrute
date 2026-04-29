@@ -1,5 +1,6 @@
 #include "dst_hash.hpp"
 
+#include <atomic>
 #include <algorithm>
 #include <csignal>
 #include <chrono>
@@ -12,11 +13,19 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -112,6 +121,8 @@ struct Config {
     bool session_explicit = false;
     bool restore_explicit = false;
     int attack_mode = 3;
+    bool mt_explicit = false;
+    std::size_t mt_threads = 0;
     std::string mode = "dst";
     std::string user;
     std::string target_hex;
@@ -215,6 +226,7 @@ Options:
       --compute              Print the hash for --user/--password
       --password PASS        Password to hash in --compute mode
       --hashfile FILE        Read HASH or USER:HASH lines from FILE
+      --mt N                 Number of cracking threads; default is CPU cores
       --charset NAME|TEXT    Charset for length-based brute force
                              Built-ins: ibm, full
       --mask MASK            Hashcat-style mask with ?1.. ?4 placeholders
@@ -254,6 +266,14 @@ struct ResumeData {
 };
 
 ResumeData to_resume(const Config& cfg, const std::string& fingerprint, std::uint64_t position);
+void save_session_state(const std::string& path,
+                        const Config& cfg,
+                        const std::string& fingerprint,
+                        std::size_t target_index,
+                        std::uint64_t position,
+                        bool complete,
+                        const std::string& user = std::string(),
+                        const std::string& target_hex = std::string());
 
 std::uint64_t fnv1a64(std::string_view text, std::uint64_t seed = 1469598103934665603ull) {
     std::uint64_t hash = seed;
@@ -425,6 +445,9 @@ Config parse_args(int argc, char** argv, std::vector<std::string>& positional) {
             cfg.password = need_value(arg.c_str());
         } else if (arg == "--hashfile" || arg == "--hash-file") {
             cfg.hashfile_path = need_value(arg.c_str());
+        } else if (arg == "--mt") {
+            cfg.mt_threads = static_cast<std::size_t>(std::stoull(need_value(arg.c_str())));
+            cfg.mt_explicit = true;
         } else if (arg == "--charset") {
             cfg.charset = need_value(arg.c_str());
         } else if (arg == "--mask") {
@@ -577,6 +600,231 @@ std::vector<TargetEntry> load_targets(const Config& cfg) {
     return targets;
 }
 
+std::size_t detect_cpu_cores() {
+#if defined(__APPLE__)
+    unsigned int count = 0;
+    std::size_t len = sizeof(count);
+    if (sysctlbyname("hw.activecpu", &count, &len, nullptr, 0) == 0 && count > 0) {
+        return static_cast<std::size_t>(count);
+    }
+    len = sizeof(count);
+    if (sysctlbyname("hw.logicalcpu", &count, &len, nullptr, 0) == 0 && count > 0) {
+        return static_cast<std::size_t>(count);
+    }
+#elif defined(__linux__)
+    const long count = sysconf(_SC_NPROCESSORS_ONLN);
+    if (count > 0) {
+        return static_cast<std::size_t>(count);
+    }
+#endif
+    const unsigned int fallback = std::thread::hardware_concurrency();
+    return fallback == 0 ? 1U : static_cast<std::size_t>(fallback);
+}
+
+std::size_t resolve_thread_count(const Config& cfg) {
+    if (cfg.mt_explicit) {
+        if (cfg.mt_threads == 0) {
+            throw std::runtime_error("--mt must be greater than zero");
+        }
+        return cfg.mt_threads;
+    }
+    return detect_cpu_cores();
+}
+
+std::uint64_t total_candidates(const std::vector<Pattern>& plan) {
+    std::uint64_t total = 0;
+    for (const auto& pattern : plan) {
+        if (total > std::numeric_limits<std::uint64_t>::max() - pattern.total) {
+            throw std::runtime_error("search space overflow");
+        }
+        total += pattern.total;
+    }
+    return total;
+}
+
+std::string candidate_for_index(const std::vector<Pattern>& plan, std::uint64_t index) {
+    for (const auto& pattern : plan) {
+        if (index < pattern.total) {
+            return pattern.candidate(index);
+        }
+        index -= pattern.total;
+    }
+    throw std::runtime_error("candidate index out of range");
+}
+
+struct CrackOutcome {
+    bool found = false;
+    bool interrupted = false;
+    std::string password;
+    std::uint64_t checkpoint = 0;
+};
+
+CrackOutcome crack_target(const TargetEntry& target,
+                          const std::vector<Pattern>& plan,
+                          const Config& cfg,
+                          const std::string& fingerprint,
+                          const std::string& session_path,
+                          std::size_t target_index,
+                          std::size_t target_count,
+                          std::uint64_t start_position,
+                          std::uint64_t total_work,
+                          std::size_t thread_count) {
+    constexpr std::uint64_t kIdle = std::numeric_limits<std::uint64_t>::max();
+
+    CrackOutcome outcome;
+    if (start_position >= total_work) {
+        outcome.checkpoint = total_work;
+        return outcome;
+    }
+
+    std::atomic<std::uint64_t> next_index(start_position);
+    std::atomic<std::uint64_t> processed(start_position);
+    std::atomic<std::size_t> finished_threads(0);
+    std::atomic<bool> found(false);
+    std::vector<std::atomic<std::uint64_t>> current(thread_count);
+    for (auto& slot : current) {
+        slot.store(kIdle, std::memory_order_relaxed);
+    }
+
+    std::string found_password;
+    std::mutex found_mutex;
+    std::vector<std::thread> workers;
+    workers.reserve(thread_count);
+
+    for (std::size_t tid = 0; tid < thread_count; ++tid) {
+        workers.emplace_back([&, tid] {
+            while (!g_stop && !found.load(std::memory_order_acquire)) {
+                const std::uint64_t idx = next_index.fetch_add(1, std::memory_order_relaxed);
+                if (idx >= total_work) {
+                    break;
+                }
+
+                current[tid].store(idx, std::memory_order_release);
+                if (g_stop || found.load(std::memory_order_acquire)) {
+                    break;
+                }
+
+                const std::string candidate = candidate_for_index(plan, idx);
+                processed.fetch_add(1, std::memory_order_relaxed);
+                if (dst::hash_password(candidate, target.user) == target.target) {
+                    {
+                        std::lock_guard<std::mutex> lock(found_mutex);
+                        if (!found.exchange(true, std::memory_order_acq_rel)) {
+                            found_password = candidate;
+                        }
+                    }
+                    break;
+                }
+                current[tid].store(kIdle, std::memory_order_release);
+            }
+            current[tid].store(kIdle, std::memory_order_release);
+            finished_threads.fetch_add(1, std::memory_order_release);
+        });
+    }
+
+    auto started = std::chrono::steady_clock::now();
+    auto last_status = started;
+    auto last_save = started;
+
+    auto checkpoint_from_state = [&]() -> std::uint64_t {
+        std::uint64_t checkpoint = next_index.load(std::memory_order_acquire);
+        for (const auto& slot : current) {
+            const auto value = slot.load(std::memory_order_acquire);
+            if (value < checkpoint) {
+                checkpoint = value;
+            }
+        }
+        if (checkpoint > total_work) {
+            checkpoint = total_work;
+        }
+        return checkpoint;
+    };
+
+    auto save_state = [&](bool complete, std::size_t next_target_index, std::uint64_t checkpoint) {
+        save_session_state(session_path,
+                           cfg,
+                           fingerprint,
+                           next_target_index,
+                           checkpoint,
+                           complete,
+                           target.user,
+                           target.target_hex);
+    };
+
+    save_state(false, target_index, start_position);
+
+    while (finished_threads.load(std::memory_order_acquire) < thread_count) {
+        if (g_stop) {
+            outcome.interrupted = true;
+            break;
+        }
+        if (found.load(std::memory_order_acquire)) {
+            outcome.found = true;
+            break;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const auto now = std::chrono::steady_clock::now();
+        const std::uint64_t checkpoint = checkpoint_from_state();
+        const std::uint64_t completed = processed.load(std::memory_order_acquire);
+        const double elapsed = std::chrono::duration<double>(now - started).count();
+
+        if (cfg.status && elapsed >= static_cast<double>(cfg.status_interval) &&
+            now - last_status >= std::chrono::seconds(static_cast<int>(cfg.status_interval))) {
+            const double rate = completed / std::max(elapsed, 0.001);
+            const double remaining = total_work > completed ? static_cast<double>(total_work - completed) / rate : 0.0;
+            std::cerr << "\r"
+                      << "target " << (target_index + 1) << '/' << target_count
+                      << " " << target.user << ':' << target.target_hex
+                      << " progress " << format_number(completed) << '/' << format_number(total_work)
+                      << " (" << std::fixed << std::setprecision(2)
+                      << (100.0 * static_cast<double>(completed) / static_cast<double>(total_work)) << "%)"
+                      << " " << format_rate(rate) << " c/s"
+                      << " eta " << format_duration(remaining)
+                      << " current=";
+            if (checkpoint < total_work) {
+                std::cerr << candidate_for_index(plan, checkpoint);
+            } else {
+                std::cerr << "done";
+            }
+            std::cerr << std::flush;
+            last_status = now;
+        }
+
+        if (std::chrono::duration<double>(now - last_save).count() >= static_cast<double>(cfg.status_interval)) {
+            save_state(false, target_index, checkpoint);
+            last_save = now;
+        }
+    }
+
+    if (g_stop) {
+        outcome.interrupted = true;
+    }
+
+    for (auto& worker : workers) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+
+    outcome.checkpoint = checkpoint_from_state();
+    outcome.found = found.load(std::memory_order_acquire);
+    if (outcome.found) {
+        std::lock_guard<std::mutex> lock(found_mutex);
+        outcome.password = found_password;
+        save_state(true, target_index + 1, 0);
+    } else if (outcome.interrupted) {
+        save_state(false, target_index, outcome.checkpoint);
+    } else {
+        save_state(false, target_index + 1, 0);
+    }
+
+    if (cfg.status) {
+        std::cerr << '\r' << std::string(160, ' ') << '\r';
+    }
+    return outcome;
+}
+
 bool session_file_exists(const std::string& path) {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -619,8 +867,8 @@ void save_session_state(const std::string& path,
                         std::size_t target_index,
                         std::uint64_t position,
                         bool complete,
-                        const std::string& user = std::string(),
-                        const std::string& target_hex = std::string()) {
+                        const std::string& user,
+                        const std::string& target_hex) {
     ResumeData data = to_resume(cfg, fingerprint, position);
     data.target_index = target_index;
     data.complete = complete;
@@ -744,13 +992,7 @@ int main(int argc, char** argv) {
         const auto plan = build_plan_from_config(cfg);
         const auto targets = load_targets(cfg);
 
-        std::uint64_t per_target_total = 0;
-        for (const auto& pattern : plan) {
-            if (per_target_total > std::numeric_limits<std::uint64_t>::max() - pattern.total) {
-                throw std::runtime_error("search space overflow");
-            }
-            per_target_total += pattern.total;
-        }
+        const std::uint64_t per_target_total = total_candidates(plan);
         if (per_target_total == 0) {
             throw std::runtime_error("empty search space");
         }
@@ -778,6 +1020,11 @@ int main(int argc, char** argv) {
             throw std::runtime_error("resume position exceeds hashfile targets");
         }
 
+        const std::size_t thread_count = resolve_thread_count(cfg);
+        if (thread_count == 0) {
+            throw std::runtime_error("thread count resolved to zero");
+        }
+
         std::uint64_t total_work = per_target_total;
         if (targets.size() > 1) {
             if (per_target_total > std::numeric_limits<std::uint64_t>::max() / targets.size()) {
@@ -786,133 +1033,49 @@ int main(int argc, char** argv) {
             total_work = per_target_total * static_cast<std::uint64_t>(targets.size());
         }
 
-        std::uint64_t processed = static_cast<std::uint64_t>(start_target_index) * per_target_total + start_position;
-        auto started = std::chrono::steady_clock::now();
-        auto last_status = started;
-        auto last_save = started;
-        bool any_cracked = false;
-
         if (resumed_session) {
             std::cerr << "resuming session: " << session_path
                       << " target=" << (start_target_index + 1) << '/' << targets.size()
                       << " position=" << start_position << '\n';
         }
 
-        const TargetEntry* initial_target = targets.empty() ? nullptr : &targets[start_target_index < targets.size() ? start_target_index : targets.size() - 1];
+        bool any_cracked = false;
         save_session_state(session_path,
                            cfg,
                            fingerprint,
                            start_target_index,
                            start_position,
                            false,
-                           initial_target ? initial_target->user : std::string(),
-                           initial_target ? initial_target->target_hex : std::string());
+                           targets[start_target_index < targets.size() ? start_target_index : targets.size() - 1].user,
+                           targets[start_target_index < targets.size() ? start_target_index : targets.size() - 1].target_hex);
 
         for (std::size_t target_index = start_target_index; target_index < targets.size(); ++target_index) {
             const auto& target = targets[target_index];
-            std::uint64_t global_position = 0;
-            std::uint64_t local_position = (target_index == start_target_index) ? start_position : 0;
-            while (!plan.empty() && local_position >= plan[0].total) {
-                local_position -= plan[0].total;
-                global_position += plan[0].total;
+            const std::uint64_t target_start = (target_index == start_target_index) ? start_position : 0;
+            const auto outcome = crack_target(target,
+                                              plan,
+                                              cfg,
+                                              fingerprint,
+                                              session_path,
+                                              target_index,
+                                              targets.size(),
+                                              target_start,
+                                              per_target_total,
+                                              thread_count);
+
+            if (outcome.interrupted) {
+                std::cerr << "\ninterrupted, session saved if configured\n";
+                return 130;
             }
 
-            bool found = false;
-            std::string found_password;
-
-            for (std::size_t pattern_index = 0; pattern_index < plan.size(); ++pattern_index) {
-                const auto& pattern = plan[pattern_index];
-                const std::uint64_t begin = (pattern_index == 0) ? local_position : 0;
-                local_position = 0;
-                for (std::uint64_t idx = begin; idx < pattern.total; ++idx) {
-                    if (g_stop) {
-                        save_session_state(session_path,
-                                           cfg,
-                                           fingerprint,
-                                           target_index,
-                                           global_position + idx + 1,
-                                           false,
-                                           target.user,
-                                           target.target_hex);
-                        std::cerr << "\ninterrupted, session saved if configured\n";
-                        return 130;
-                    }
-
-                    const std::string candidate = pattern.candidate(idx);
-                    const auto actual = dst::hash_password(candidate, target.user);
-                    ++processed;
-                    if (actual == target.target) {
-                        found = true;
-                        found_password = candidate;
-                        any_cracked = true;
-                        std::cout << target.user << ':' << found_password << " -> " << target.target_hex << '\n';
-                        save_session_state(session_path,
-                                           cfg,
-                                           fingerprint,
-                                           target_index + 1,
-                                           0,
-                                           true,
-                                           target.user,
-                                           target.target_hex);
-                        break;
-                    }
-
-                    const auto now = std::chrono::steady_clock::now();
-                    const double elapsed = std::chrono::duration<double>(now - started).count();
-                    const auto save_elapsed = std::chrono::duration<double>(now - last_save).count();
-                    if (save_elapsed >= static_cast<double>(cfg.status_interval)) {
-                        save_session_state(session_path,
-                                           cfg,
-                                           fingerprint,
-                                           target_index,
-                                           global_position + idx + 1,
-                                           false,
-                                           target.user,
-                                           target.target_hex);
-                        last_save = now;
-                    }
-                    if (cfg.status && elapsed >= static_cast<double>(cfg.status_interval) &&
-                        now - last_status >= std::chrono::seconds(static_cast<int>(cfg.status_interval))) {
-                        const double rate = processed / std::max(elapsed, 0.001);
-                        const double remaining = total_work > processed ? static_cast<double>(total_work - processed) / rate : 0.0;
-                        std::cerr << "\r"
-                                  << "target " << (target_index + 1) << '/' << targets.size()
-                                  << " " << target.user << ':' << target.target_hex
-                                  << " progress " << format_number(processed) << '/' << format_number(total_work)
-                                  << " (" << std::fixed << std::setprecision(2)
-                                  << (100.0 * static_cast<double>(processed) / static_cast<double>(total_work)) << "%)"
-                                  << " " << format_rate(rate) << " c/s"
-                                  << " eta " << format_duration(remaining)
-                                  << " current=" << candidate << std::flush;
-                        last_status = now;
-                    }
-                }
-                global_position += pattern.total;
-                if (found) {
-                    break;
-                }
-            }
-
-            if (!found) {
-                save_session_state(session_path,
-                                   cfg,
-                                   fingerprint,
-                                   target_index + 1,
-                                   0,
-                                   false,
-                                   target.user,
-                                   target.target_hex);
-            }
-            if (cfg.status) {
-                std::cerr << '\r' << std::string(140, ' ') << '\r';
-            }
-
-            if (!found) {
+            if (outcome.found) {
+                any_cracked = true;
+                std::cout << target.user << ':' << outcome.password << " -> " << target.target_hex << '\n';
+            } else {
                 std::cout << target.user << ':' << target.target_hex << " -> not found\n";
             }
         }
 
-        save_session_state(session_path, cfg, fingerprint, targets.size(), 0, true);
         if (!any_cracked) {
             std::cout << "no match in " << format_number(total_work) << " candidates\n";
             return 1;
