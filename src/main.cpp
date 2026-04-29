@@ -133,7 +133,7 @@ struct Config {
     std::string session_path;
     std::string restore_path;
     std::string hashfile_path;
-    std::string charset = "full";
+    std::string charset = "ibm";
     std::string mask;
     std::string custom1;
     std::string custom2;
@@ -148,7 +148,7 @@ std::string builtin_charset(std::string_view name) {
     if (name == "full") {
         // Full 40-char DST alphabet: A-Z plus 0-9 plus the four EBCDIC-mappable
         // symbols (#, @, $, _) that the SST/DST password validator accepts.
-        // This is the default and recovers the operator's literal plaintext.
+        // Recovers the operator's literal plaintext.
         return "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#@$_";
     }
     if (name == "ibm") {
@@ -160,8 +160,9 @@ std::string builtin_charset(std::string_view name) {
         // plaintext is the canonical equivalent of the operator's password,
         // not the original (e.g. "QSECOFR" recovers as "QSDBOFQ" because Q/R,
         // E/D, C/B all collide under DES key-schedule parity stripping).
-        // Useful for V4R5 hashes where any equivalence-class member
-        // authenticates.  Not useful for V3R2, which appears parity-sensitive.
+        // This is the default. Useful for V4R5 hashes where any
+        // equivalence-class member authenticates.  Not useful for V3R2, which
+        // appears parity-sensitive.
         return "ABDFHJKMOQSUWY02468#@$_";
     }
     return std::string(name);
@@ -246,10 +247,10 @@ Options:
       --engine NAME         Cracking engine: mt, metal, or auto
       --charset NAME|TEXT    Charset for length-based brute force
                              Built-ins:
-                               full (default) - all 40 DST-valid chars,
+                               full           - all 40 DST-valid chars,
                                  recovers literal plaintext, 23^8 / 40^8
                                  = ~1/80 the rate of the canonical search
-                               ibm            - 23-char DES-distinct subset,
+                               ibm (default)  - 23-char DES-distinct subset,
                                  ~80x faster but returns canonical equivalent
                                  (only safe on V4R5 where parity is stripped)
       --mask MASK            Hashcat-style mask with ?1.. ?4 placeholders
