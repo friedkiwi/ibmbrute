@@ -9,5 +9,6 @@
 - Keep `--engine mt|metal|auto` selection wired into startup reporting and session identity.
 - If Metal is selected, print a backend details line that identifies the device and batch size.
 - Use the Metal path to batch encoded candidates through the GPU; keep CPU cracking as the fallback engine.
+- Print a final elapsed-time summary when a cracking run finishes or is interrupted.
 - Prefer small, reviewable changes with verification after each feature.
 - Preserve user-created working notes unless the user asks to track them.

@@ -1205,6 +1205,7 @@ int main(int argc, char** argv) {
             }
         }
 
+        const auto run_started = std::chrono::steady_clock::now();
         std::cerr << engine_banner(requested_engine, cfg, thread_count) << '\n';
         if (cfg.engine == "metal") {
             std::cerr << metal_banner() << '\n';
@@ -1262,6 +1263,8 @@ int main(int argc, char** argv) {
             }
 
             if (current_outcome.interrupted) {
+                const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - run_started).count();
+                std::cerr << "interrupted after " << format_duration(elapsed) << '\n';
                 std::cerr << "\ninterrupted, session saved if configured\n";
                 return 130;
             }
@@ -1273,6 +1276,11 @@ int main(int argc, char** argv) {
                 std::cout << target.user << ':' << target.target_hex << " -> not found\n";
             }
         }
+
+        const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - run_started).count();
+        const double average_rate = total_work / std::max(elapsed, 0.001);
+        std::cerr << "finished in " << format_duration(elapsed)
+                  << " (" << format_rate(average_rate) << " c/s average)\n";
 
         if (!any_cracked) {
             std::cout << "no match in " << format_number(total_work) << " candidates\n";
