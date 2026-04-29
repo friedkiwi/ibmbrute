@@ -229,7 +229,7 @@ Options:
       --password PASS        Password to hash in --compute mode
       --hashfile FILE        Read HASH or USER:HASH lines from FILE
       --mt N                 Number of cracking threads; default is CPU cores
-      --engine NAME         Cracking engine: mt or metal
+      --engine NAME         Cracking engine: mt, metal, or auto
       --charset NAME|TEXT    Charset for length-based brute force
                              Built-ins: ibm, full
       --mask MASK            Hashcat-style mask with ?1.. ?4 placeholders
@@ -643,12 +643,9 @@ std::size_t resolve_thread_count(const Config& cfg) {
 std::string engine_banner(std::string_view requested_engine, const Config& cfg, std::size_t thread_count) {
     std::ostringstream oss;
     if (cfg.engine == "metal") {
-        oss << "engine: metal (" << (requested_engine == "auto" ? "auto-selected" : "selected by CLI");
-        if (metal_backend::compiled()) {
-            oss << "; TODO: implement metal; CPU fallback threads=" << thread_count << ")";
-        } else {
-            oss << "; but Metal is not compiled in)";
-        }
+        oss << "engine: metal ("
+            << (requested_engine == "auto" ? "auto-selected" : "selected by CLI")
+            << ", batch size " << metal_backend::batch_size() << ")";
     } else if (thread_count == 1) {
         oss << "engine: single-threaded CPU cracker (1 thread)";
     } else if (cfg.mt_explicit) {
@@ -667,7 +664,7 @@ std::string metal_banner() {
 
 std::string resolve_engine(const Config& cfg) {
     if (cfg.engine == "auto") {
-        return metal_backend::compiled() ? std::string("metal") : std::string("mt");
+        return metal_backend::available() ? std::string("metal") : std::string("mt");
     }
     return cfg.engine;
 }
@@ -866,6 +863,129 @@ CrackOutcome crack_target(const TargetEntry& target,
     return outcome;
 }
 
+CrackOutcome crack_target_metal(const TargetEntry& target,
+                                const std::vector<Pattern>& plan,
+                                const Config& cfg,
+                                const std::string& fingerprint,
+                                const std::string& session_path,
+                                std::size_t target_index,
+                                std::size_t target_count,
+                                std::uint64_t start_position,
+                                std::uint64_t total_work) {
+    CrackOutcome outcome;
+    if (start_position >= total_work) {
+        outcome.checkpoint = total_work;
+        return outcome;
+    }
+    if (!metal_backend::available()) {
+        throw std::runtime_error("metal engine selected but Metal is not available at runtime");
+    }
+
+    const std::size_t batch_limit = metal_backend::batch_size();
+    if (batch_limit == 0) {
+        throw std::runtime_error("metal batch size resolved to zero");
+    }
+
+    const dst::Block8 user_block = dst::ebcdic8(target.user);
+    std::vector<dst::Block8> encoded_candidates;
+    encoded_candidates.reserve(batch_limit);
+
+    auto started = std::chrono::steady_clock::now();
+    auto last_status = started;
+    auto last_save = started;
+
+    auto save_state = [&](bool complete, std::size_t next_target_index, std::uint64_t checkpoint) {
+        save_session_state(session_path,
+                           cfg,
+                           fingerprint,
+                           next_target_index,
+                           checkpoint,
+                           complete,
+                           target.user,
+                           target.target_hex);
+    };
+
+    save_state(false, target_index, start_position);
+
+    std::uint64_t processed = start_position;
+    while (processed < total_work) {
+        if (g_stop) {
+            outcome.interrupted = true;
+            break;
+        }
+
+        const std::uint64_t batch_count = std::min<std::uint64_t>(batch_limit, total_work - processed);
+        encoded_candidates.clear();
+        encoded_candidates.reserve(static_cast<std::size_t>(batch_count));
+        for (std::uint64_t offset = 0; offset < batch_count; ++offset) {
+            encoded_candidates.push_back(dst::ebcdic8(candidate_for_index(plan, processed + offset)));
+        }
+
+        const std::uint64_t batch_start = processed;
+        std::size_t match_index = 0;
+        const bool found = metal_backend::crack_batch(encoded_candidates, user_block, target.target, match_index);
+        processed += batch_count;
+
+        if (found) {
+            outcome.found = true;
+            outcome.password = candidate_for_index(plan, batch_start + match_index);
+            outcome.checkpoint = processed;
+            save_state(true, target_index + 1, 0);
+            break;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const std::uint64_t checkpoint = processed;
+        const std::uint64_t completed = processed - start_position;
+        const double elapsed = std::chrono::duration<double>(now - started).count();
+
+        if (cfg.status && elapsed >= static_cast<double>(cfg.status_interval) &&
+            now - last_status >= std::chrono::seconds(static_cast<int>(cfg.status_interval))) {
+            const double rate = completed / std::max(elapsed, 0.001);
+            const double remaining = total_work > processed ? static_cast<double>(total_work - processed) / rate : 0.0;
+            std::cerr << "\r"
+                      << "target " << (target_index + 1) << '/' << target_count
+                      << " " << target.user << ':' << target.target_hex
+                      << " progress " << format_number(completed) << '/' << format_number(total_work)
+                      << " (" << std::fixed << std::setprecision(2)
+                      << (100.0 * static_cast<double>(completed) / static_cast<double>(total_work)) << "%)"
+                      << " " << format_rate(rate) << " c/s"
+                      << " eta " << format_duration(remaining)
+                      << " current=";
+            if (checkpoint < total_work) {
+                std::cerr << candidate_for_index(plan, checkpoint);
+            } else {
+                std::cerr << "done";
+            }
+            std::cerr << std::flush;
+            last_status = now;
+        }
+
+        if (std::chrono::duration<double>(now - last_save).count() >= static_cast<double>(cfg.status_interval)) {
+            save_state(false, target_index, checkpoint);
+            last_save = now;
+        }
+    }
+
+    if (g_stop) {
+        outcome.interrupted = true;
+    }
+
+    outcome.checkpoint = processed;
+    if (outcome.found) {
+        save_state(true, target_index + 1, 0);
+    } else if (outcome.interrupted) {
+        save_state(false, target_index, processed);
+    } else {
+        save_state(false, target_index + 1, 0);
+    }
+
+    if (cfg.status) {
+        std::cerr << '\r' << std::string(160, ' ') << '\r';
+    }
+    return outcome;
+}
+
 bool session_file_exists(const std::string& path) {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -1028,8 +1148,8 @@ int main(int argc, char** argv) {
         if (cfg.engine != "mt" && cfg.engine != "metal") {
             throw std::runtime_error("unknown engine: " + cfg.engine);
         }
-        if (cfg.engine == "metal" && !metal_backend::compiled()) {
-            throw std::runtime_error("metal engine requested but Metal support is not compiled in");
+        if (cfg.engine == "metal" && !metal_backend::available()) {
+            throw std::runtime_error("metal engine requested but Metal is not available at runtime");
         }
 
         if (cfg.hashfile_path.empty() && cfg.target_hex.empty()) {
@@ -1076,13 +1196,18 @@ int main(int argc, char** argv) {
             throw std::runtime_error("resume position exceeds hashfile targets");
         }
 
-        const std::size_t thread_count = resolve_thread_count(cfg);
-        if (thread_count == 0) {
-            throw std::runtime_error("thread count resolved to zero");
+        std::size_t thread_count = 0;
+        if (cfg.engine == "mt") {
+            thread_count = resolve_thread_count(cfg);
+            if (thread_count == 0) {
+                throw std::runtime_error("thread count resolved to zero");
+            }
         }
 
         std::cerr << engine_banner(requested_engine, cfg, thread_count) << '\n';
-        std::cerr << metal_banner() << '\n';
+        if (cfg.engine == "metal") {
+            std::cerr << metal_banner() << '\n';
+        }
 
         std::uint64_t total_work = per_target_total;
         if (targets.size() > 1) {
@@ -1111,25 +1236,38 @@ int main(int argc, char** argv) {
         for (std::size_t target_index = start_target_index; target_index < targets.size(); ++target_index) {
             const auto& target = targets[target_index];
             const std::uint64_t target_start = (target_index == start_target_index) ? start_position : 0;
-            const auto outcome = crack_target(target,
-                                              plan,
-                                              cfg,
-                                              fingerprint,
-                                              session_path,
-                                              target_index,
-                                              targets.size(),
-                                              target_start,
-                                              per_target_total,
-                                              thread_count);
+            CrackOutcome current_outcome;
+            if (cfg.engine == "metal") {
+                current_outcome = crack_target_metal(target,
+                                                      plan,
+                                                      cfg,
+                                                      fingerprint,
+                                                      session_path,
+                                                      target_index,
+                                                      targets.size(),
+                                                      target_start,
+                                                      per_target_total);
+            } else {
+                current_outcome = crack_target(target,
+                                               plan,
+                                               cfg,
+                                               fingerprint,
+                                               session_path,
+                                               target_index,
+                                               targets.size(),
+                                               target_start,
+                                               per_target_total,
+                                               thread_count);
+            }
 
-            if (outcome.interrupted) {
+            if (current_outcome.interrupted) {
                 std::cerr << "\ninterrupted, session saved if configured\n";
                 return 130;
             }
 
-            if (outcome.found) {
+            if (current_outcome.found) {
                 any_cracked = true;
-                std::cout << target.user << ':' << outcome.password << " -> " << target.target_hex << '\n';
+                std::cout << target.user << ':' << current_outcome.password << " -> " << target.target_hex << '\n';
             } else {
                 std::cout << target.user << ':' << target.target_hex << " -> not found\n";
             }
