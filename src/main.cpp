@@ -1,4 +1,5 @@
 #include "dst_hash.hpp"
+#include "metal/metal_backend.hpp"
 
 #include <atomic>
 #include <algorithm>
@@ -123,6 +124,7 @@ struct Config {
     int attack_mode = 3;
     bool mt_explicit = false;
     std::size_t mt_threads = 0;
+    std::string engine = "mt";
     std::string mode = "dst";
     std::string user;
     std::string target_hex;
@@ -227,6 +229,7 @@ Options:
       --password PASS        Password to hash in --compute mode
       --hashfile FILE        Read HASH or USER:HASH lines from FILE
       --mt N                 Number of cracking threads; default is CPU cores
+      --engine NAME         Cracking engine: mt or metal
       --charset NAME|TEXT    Charset for length-based brute force
                              Built-ins: ibm, full
       --mask MASK            Hashcat-style mask with ?1.. ?4 placeholders
@@ -251,6 +254,7 @@ struct ResumeData {
     std::string target_hex;
     std::string hashfile_path;
     std::string fingerprint;
+    std::string engine;
     std::string charset;
     std::string mask;
     std::string custom1;
@@ -311,6 +315,7 @@ std::string file_signature(const std::string& path) {
 std::string session_fingerprint(const Config& cfg) {
     std::ostringstream seed;
     seed << "mode=" << cfg.mode << '\n'
+         << "engine=" << cfg.engine << '\n'
          << "user=" << cfg.user << '\n'
          << "target=" << cfg.target_hex << '\n'
          << "hashfile=" << cfg.hashfile_path << '\n'
@@ -354,6 +359,7 @@ void save_resume(const std::string& path, const ResumeData& data) {
     write_kv(out, "target", data.target_hex);
     write_kv(out, "hashfile", data.hashfile_path);
     write_kv(out, "fingerprint", data.fingerprint);
+    write_kv(out, "engine", data.engine);
     write_kv(out, "charset", data.charset);
     write_kv(out, "mask", data.mask);
     write_kv(out, "custom1", data.custom1);
@@ -401,6 +407,7 @@ ResumeData load_resume(const std::string& path) {
     data.target_hex = get("target");
     data.hashfile_path = get("hashfile");
     data.fingerprint = get("fingerprint");
+    data.engine = get("engine");
     data.charset = get("charset");
     data.mask = get("mask");
     data.custom1 = get("custom1");
@@ -448,6 +455,8 @@ Config parse_args(int argc, char** argv, std::vector<std::string>& positional) {
         } else if (arg == "--mt") {
             cfg.mt_threads = static_cast<std::size_t>(std::stoull(need_value(arg.c_str())));
             cfg.mt_explicit = true;
+        } else if (arg == "--engine") {
+            cfg.engine = need_value(arg.c_str());
         } else if (arg == "--charset") {
             cfg.charset = need_value(arg.c_str());
         } else if (arg == "--mask") {
@@ -632,16 +641,26 @@ std::size_t resolve_thread_count(const Config& cfg) {
 }
 
 std::string engine_banner(const Config& cfg, std::size_t thread_count) {
-    if (thread_count == 1) {
-        return "engine: single-threaded cracker (1 thread)";
-    }
     std::ostringstream oss;
-    if (cfg.mt_explicit) {
-        oss << "engine: multithreaded cracker (explicit, " << thread_count << " threads)";
+    if (cfg.engine == "metal") {
+        oss << "engine: metal";
+        if (metal_backend::compiled()) {
+            oss << " (selected, CPU fallback threads=" << thread_count << ")";
+        } else {
+            oss << " (selected, but Metal is not compiled in)";
+        }
+    } else if (thread_count == 1) {
+        oss << "engine: single-threaded CPU cracker (1 thread)";
+    } else if (cfg.mt_explicit) {
+        oss << "engine: multithreaded CPU cracker (explicit, " << thread_count << " threads)";
     } else {
-        oss << "engine: multithreaded cracker (default, spawned " << thread_count << " threads)";
+        oss << "engine: multithreaded CPU cracker (default, spawned " << thread_count << " threads)";
     }
     return oss.str();
+}
+
+std::string metal_banner() {
+    return std::string("metal: ") + metal_backend::device_description();
 }
 
 std::uint64_t total_candidates(const std::vector<Pattern>& plan) {
@@ -904,6 +923,7 @@ std::vector<Pattern> build_plan_from_config(const Config& cfg) {
 ResumeData to_resume(const Config& cfg, const std::string& fingerprint, std::uint64_t position) {
     ResumeData data;
     data.mode = cfg.mask.empty() ? "lengths" : "mask";
+    data.engine = cfg.engine;
     data.user = cfg.user;
     data.target_hex = cfg.target_hex;
     data.hashfile_path = cfg.hashfile_path;
@@ -951,6 +971,9 @@ int main(int argc, char** argv) {
 
         if (!cfg.restore_path.empty()) {
             const ResumeData restored = load_resume(cfg.restore_path);
+            if (!restored.engine.empty()) {
+                cfg.engine = restored.engine;
+            }
             if (!restored.user.empty()) {
                 cfg.user = restored.user;
             }
@@ -987,6 +1010,13 @@ int main(int argc, char** argv) {
             const auto hash = dst::hex_encode(dst::hash_password(cfg.password, cfg.user));
             std::cout << hash << '\n';
             return 0;
+        }
+
+        if (cfg.engine != "mt" && cfg.engine != "metal") {
+            throw std::runtime_error("unknown engine: " + cfg.engine);
+        }
+        if (cfg.engine == "metal" && !metal_backend::compiled()) {
+            throw std::runtime_error("metal engine requested but Metal support is not compiled in");
         }
 
         if (cfg.hashfile_path.empty() && cfg.target_hex.empty()) {
@@ -1039,6 +1069,7 @@ int main(int argc, char** argv) {
         }
 
         std::cerr << engine_banner(cfg, thread_count) << '\n';
+        std::cerr << metal_banner() << '\n';
 
         std::uint64_t total_work = per_target_total;
         if (targets.size() > 1) {
