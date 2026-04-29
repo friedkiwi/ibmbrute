@@ -1,0 +1,14 @@
+/build/
+/cmake-build-*/
+*.session
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+*.exe
+*.out
+.DS_Store
+compile_commands.json
