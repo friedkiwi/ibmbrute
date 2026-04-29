@@ -138,77 +138,77 @@ constant uchar SBOX[8][64] = {
     },
 };
 
-inline uint64_t permute(uint64_t input, constant uchar* table, uint32_t count, uint32_t input_bits)
+inline ulong permute(ulong input, constant uchar* table, uint count, uint input_bits)
 {
-    uint64_t output = 0;
-    for (uint32_t i = 0; i < count; ++i) {
+    ulong output = 0;
+    for (uint i = 0; i < count; ++i) {
         output <<= 1;
-        const uint32_t bit_index = input_bits - uint32_t(table[i]);
+        const uint bit_index = input_bits - uint(table[i]);
         output |= (input >> bit_index) & 1ul;
     }
     return output;
 }
 
-inline uint64_t load_be64(const device uchar* bytes)
+inline ulong load_be64(const device uchar* bytes)
 {
-    uint64_t value = 0;
-    for (uint32_t i = 0; i < 8; ++i) {
-        value = (value << 8) | uint64_t(bytes[i]);
+    ulong value = 0;
+    for (uint i = 0; i < 8; ++i) {
+        value = (value << 8) | ulong(bytes[i]);
     }
     return value;
 }
 
-inline uint64_t rotate_left_28(uint64_t value, uint32_t shift)
+inline ulong rotate_left_28(ulong value, uint shift)
 {
     value &= 0x0ffffffful;
     return ((value << shift) | (value >> (28 - shift))) & 0x0ffffffful;
 }
 
-inline uint32_t feistel(uint32_t half, const uint64_t* round_keys, uint32_t round)
+inline uint feistel(uint half, thread const ulong* round_keys, uint round)
 {
-    const uint64_t expanded = permute(uint64_t(half) << 32, E, 48, 64);
-    const uint64_t mixed = expanded ^ round_keys[round];
+    const ulong expanded = permute((ulong)half << 32, E, 48, 64);
+    const ulong mixed = expanded ^ round_keys[round];
 
-    uint32_t substituted = 0;
-    for (uint32_t box = 0; box < 8; ++box) {
-        const uint32_t shift = 42 - (box * 6);
+    uint substituted = 0;
+    for (uint box = 0; box < 8; ++box) {
+        const uint shift = 42 - (box * 6);
         const uchar chunk = uchar((mixed >> shift) & 0x3ful);
         const uchar row = uchar(((chunk & 0x20u) >> 4) | (chunk & 0x01u));
         const uchar col = uchar((chunk >> 1) & 0x0fu);
         const uchar value = SBOX[box][row * 16 + col];
-        substituted = (substituted << 4) | uint32_t(value);
+        substituted = (substituted << 4) | uint(value);
     }
 
-    return uint32_t(permute(uint64_t(substituted) << 32, P, 32, 64));
+    return uint(permute((ulong)substituted << 32, P, 32, 64));
 }
 
-inline uint64_t des_encrypt(uint64_t key, uint64_t block)
+inline ulong des_encrypt(ulong key, ulong block)
 {
-    uint64_t round_keys[16];
+    ulong round_keys[16];
 
-    const uint64_t pc1 = permute(key, PC1, 56, 64);
-    uint64_t c = (pc1 >> 28) & 0x0ffffffful;
-    uint64_t d = pc1 & 0x0ffffffful;
+    const ulong pc1 = permute(key, PC1, 56, 64);
+    ulong c = (pc1 >> 28) & 0x0ffffffful;
+    ulong d = pc1 & 0x0ffffffful;
 
-    for (uint32_t round = 0; round < 16; ++round) {
-        c = rotate_left_28(c, uint32_t(SHIFTS[round]));
-        d = rotate_left_28(d, uint32_t(SHIFTS[round]));
-        const uint64_t cd = (c << 28) | d;
+    for (uint round = 0; round < 16; ++round) {
+        c = rotate_left_28(c, uint(SHIFTS[round]));
+        d = rotate_left_28(d, uint(SHIFTS[round]));
+        const ulong cd = (c << 28) | d;
         round_keys[round] = permute(cd << 8, PC2, 48, 64);
     }
 
-    const uint64_t state = permute(block, IP, 64, 64);
-    uint32_t left = uint32_t(state >> 32);
-    uint32_t right = uint32_t(state & 0xfffffffful);
+    const ulong state = permute(block, IP, 64, 64);
+    uint left = uint(state >> 32);
+    uint right = uint(state & 0xfffffffful);
 
-    for (uint32_t round = 0; round < 16; ++round) {
-        const uint32_t next_left = right;
-        const uint32_t next_right = left ^ feistel(right, round_keys, round);
+    for (uint round = 0; round < 16; ++round) {
+        const uint next_left = right;
+        const uint next_right = left ^ feistel(right, round_keys, round);
         left = next_left;
         right = next_right;
     }
 
-    const uint64_t preoutput = (uint64_t(right) << 32) | uint64_t(left);
+    const ulong preoutput = (ulong(right) << 32) | ulong(left);
     return permute(preoutput, FP, 64, 64);
 }
 
@@ -223,10 +223,10 @@ kernel void dst_kernel(const device uchar* keys [[buffer(0)]],
         return;
     }
 
-    const uint64_t key = load_be64(keys + (gid * 8));
-    const uint64_t user_block = load_be64(user);
-    const uint64_t target_block = load_be64(target);
-    const uint64_t hash = des_encrypt(key, user_block);
+    const ulong key = load_be64(keys + (gid * 8));
+    const ulong user_block = load_be64(user);
+    const ulong target_block = load_be64(target);
+    const ulong hash = des_encrypt(key, user_block);
     matches[gid] = hash == target_block ? 1u : 0u;
 }
 )metal";
