@@ -171,10 +171,27 @@ int run_cli(int argc, char** argv) {
         for (std::size_t target_index = start_target_index; target_index < targets.size(); ++target_index) {
             const auto& target = targets[target_index];
             const std::uint64_t target_start = (target_index == start_target_index) ? start_position : 0;
+            std::string found_password;
+
+            if (load_found_password(target, &found_password)) {
+                any_cracked = true;
+                ++total_matches;
+                std::cout << target.user << ':' << found_password << " -> " << target.target_hex << '\n';
+                save_session_state(session_path,
+                                   cfg,
+                                   fingerprint,
+                                   target_index + 1,
+                                   0,
+                                   target_index + 1 >= targets.size(),
+                                   target.user,
+                                   target.target_hex);
+                continue;
+            }
 
             if (has_default_password(target)) {
                 any_cracked = true;
                 ++total_matches;
+                save_found_password(target, target.user);
                 std::cout << target.user << ':' << target.user << " -> " << target.target_hex << '\n';
                 save_session_state(session_path,
                                    cfg,
@@ -232,6 +249,11 @@ int run_cli(int argc, char** argv) {
             if (current_outcome.found) {
                 any_cracked = true;
                 total_matches += current_outcome.passwords.size();
+                const std::string& cached_password = current_outcome.passwords.front();
+                if (!password_matches_target(target, cached_password)) {
+                    throw std::runtime_error("candidate verification failed before reporting a discovered password");
+                }
+                save_found_password(target, cached_password);
                 if (!cfg.keep_going) {
                     for (const auto& password : current_outcome.passwords) {
                         std::cout << target.user << ':' << password << " -> " << target.target_hex << '\n';

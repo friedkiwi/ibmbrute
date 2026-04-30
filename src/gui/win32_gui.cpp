@@ -425,10 +425,28 @@ void finish_worker(AppState& state, std::unique_ptr<WorkerResult> result)
                      L"Cracking stopped. Session state was saved.",
                      L"ibmbrute GPU");
     } else if (result->outcome.found && !result->outcome.passwords.empty()) {
+        const std::string& password = result->outcome.passwords.front();
+        try {
+            const ibmbrute_app::TargetEntry target{
+                result->user, result->target_hex, dst::hex_decode8(result->target_hex)};
+            if (!ibmbrute_app::password_matches_target(target, password)) {
+                throw std::runtime_error("discovered password failed final verification");
+            }
+            ibmbrute_app::save_found_password(target, password);
+        } catch (const std::exception& ex) {
+            const std::wstring message = widen_ascii(ex.what());
+            set_status_text(state, message);
+            show_message(state.hwnd, MB_ICONERROR | MB_OK, message, L"ibmbrute GPU");
+            state.active_plan.clear();
+            if (state.close_when_idle) {
+                EndDialog(state.hwnd, 0);
+            }
+            return;
+        }
         const std::wstring message = L"Match found for user " + widen_ascii(result->user) +
                                      L" and hash " + widen_ascii(result->target_hex) + L" in " +
                                      format_elapsed_hms(result->elapsed_seconds) + L" -> " +
-                                     widen_ascii(result->outcome.passwords.front());
+                                     widen_ascii(password);
         set_status_text(state, message);
         show_message(state.hwnd, MB_ICONINFORMATION | MB_OK, message, L"ibmbrute GPU");
     } else {
@@ -475,7 +493,25 @@ void begin_crack(AppState& state)
         }
 
         const ibmbrute_app::TargetEntry target = targets.front();
+        std::string found_password;
+        if (ibmbrute_app::load_found_password(target, &found_password)) {
+            ibmbrute_app::save_session_state(session_path,
+                                             cfg,
+                                             fingerprint,
+                                             1,
+                                             0,
+                                             true,
+                                             target.user,
+                                             target.target_hex);
+            const std::wstring message = L"Match found for user " + widen_ascii(target.user) +
+                                         L" and hash " + widen_ascii(target.target_hex) + L" in " +
+                                         format_elapsed_hms(0.0) + L" -> " + widen_ascii(found_password);
+            set_status_text(state, message);
+            show_message(state.hwnd, MB_ICONINFORMATION | MB_OK, message, L"ibmbrute GPU");
+            return;
+        }
         if (ibmbrute_app::has_default_password(target)) {
+            ibmbrute_app::save_found_password(target, target.user);
             ibmbrute_app::save_session_state(session_path,
                                              cfg,
                                              fingerprint,

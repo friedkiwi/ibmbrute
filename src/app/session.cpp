@@ -5,6 +5,7 @@
 #include <map>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 namespace ibmbrute_app {
 
@@ -45,6 +46,10 @@ std::string file_signature(const std::string& path) {
 
 std::string default_session_path(const Config& cfg) {
     return ".ibmbrute-" + session_fingerprint(cfg) + ".session";
+}
+
+std::string found_passwords_path() {
+    return "ibmbrute-found.txt";
 }
 
 void write_kv(std::ostream& out, const char* key, const std::string& value) {
@@ -121,6 +126,84 @@ ResumeData to_resume(const Config& cfg, const std::string& fingerprint, std::uin
     data.position = position;
     data.compute = cfg.compute;
     return data;
+}
+
+struct FoundPasswordRecord {
+    std::string user;
+    std::string target_hex;
+    std::string password;
+};
+
+bool parse_found_password_line(const std::string& raw_line, FoundPasswordRecord* record) {
+    const std::string line = trim(raw_line);
+    if (line.empty() || line[0] == '#') {
+        return false;
+    }
+
+    const auto first_sep = line.find(':');
+    if (first_sep == std::string::npos) {
+        return false;
+    }
+    const auto second_sep = line.find(':', first_sep + 1);
+    if (second_sep == std::string::npos || line.find(':', second_sep + 1) != std::string::npos) {
+        return false;
+    }
+
+    const std::string user = trim(line.substr(0, first_sep));
+    const std::string target_hex = trim(line.substr(first_sep + 1, second_sep - first_sep - 1));
+    const std::string password = trim(line.substr(second_sep + 1));
+    if (user.empty() || target_hex.empty() || password.empty()) {
+        return false;
+    }
+
+    record->user = user;
+    record->target_hex = target_hex;
+    record->password = password;
+    return true;
+}
+
+bool found_record_matches_target(const FoundPasswordRecord& record, const TargetEntry& target) {
+    if (record.user != target.user) {
+        return false;
+    }
+    try {
+        return dst::hex_decode8(record.target_hex) == target.target;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+std::vector<FoundPasswordRecord> load_found_password_records(const std::string& path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(path, ec)) {
+        return {};
+    }
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        throw std::runtime_error("failed to open found-password file: " + path);
+    }
+
+    std::vector<FoundPasswordRecord> records;
+    std::string line;
+    while (std::getline(in, line)) {
+        FoundPasswordRecord record;
+        if (parse_found_password_line(line, &record)) {
+            records.push_back(std::move(record));
+        }
+    }
+    return records;
+}
+
+void write_found_password_records(const std::string& path, const std::vector<FoundPasswordRecord>& records) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw std::runtime_error("failed to write found-password file: " + path);
+    }
+    for (const auto& record : records) {
+        out << record.user << ':' << record.target_hex << ':' << record.password << '\n';
+    }
 }
 
 }  // namespace
@@ -224,6 +307,66 @@ void save_session_state(const std::string& path,
         data.target_hex = target_hex;
     }
     save_resume(path, data);
+}
+
+bool password_matches_target(const TargetEntry& target, std::string_view password) {
+    return dst::hash_password(std::string(password), target.user) == target.target;
+}
+
+bool load_found_password(const TargetEntry& target, std::string* password) {
+    const std::vector<FoundPasswordRecord> records = load_found_password_records(found_passwords_path());
+    for (const auto& record : records) {
+        if (!found_record_matches_target(record, target)) {
+            continue;
+        }
+        if (!password_matches_target(target, record.password)) {
+            continue;
+        }
+        if (password != nullptr) {
+            *password = record.password;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool save_found_password(const TargetEntry& target, std::string_view password) {
+    if (!password_matches_target(target, password)) {
+        return false;
+    }
+
+    const std::string path = found_passwords_path();
+    std::vector<FoundPasswordRecord> records = load_found_password_records(path);
+    bool saw_target = false;
+    bool mutated = false;
+    for (auto& record : records) {
+        if (!found_record_matches_target(record, target)) {
+            continue;
+        }
+        saw_target = true;
+        if (password_matches_target(target, record.password)) {
+            return true;
+        }
+        record.password = std::string(password);
+        record.target_hex = target.target_hex;
+        mutated = true;
+    }
+
+    if (mutated) {
+        write_found_password_records(path, records);
+        return true;
+    }
+
+    if (saw_target) {
+        return true;
+    }
+
+    std::ofstream out(path, std::ios::app | std::ios::binary);
+    if (!out) {
+        throw std::runtime_error("failed to write found-password file: " + path);
+    }
+    out << target.user << ':' << target.target_hex << ':' << password << '\n';
+    return true;
 }
 
 }  // namespace ibmbrute_app
