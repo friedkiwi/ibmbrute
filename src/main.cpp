@@ -118,6 +118,7 @@ struct Pattern {
 struct Config {
     bool verify = false;
     bool compute = false;
+    bool benchmark = false;
     bool help = false;
     bool status = true;
     bool keep_going = false;
@@ -143,6 +144,8 @@ struct Config {
     std::size_t min_len = 1;
     std::size_t max_len = 8;
     std::size_t status_interval = 1;
+    std::size_t cuda_batch_size = 0;
+    unsigned int cuda_thread_count = 0;
 };
 
 std::string builtin_charset(std::string_view name) {
@@ -235,6 +238,7 @@ R"(ibmbrute - brute-force DST/AS400 password hashes
 
 Usage:
   ibmbrute --verify
+  ibmbrute --benchmark
   ibmbrute --compute --user USER --password PASS
   ibmbrute --user USER --target HASH [options]
 
@@ -242,10 +246,14 @@ Options:
   -u, --user USER            User-id used as the DES plaintext
   -t, --target HASH          16 hex chars target hash
       --compute              Print the hash for --user/--password
+      --benchmark            Run a synthetic CUDA benchmark and suggest
+                             --cuda-batch-size / --cuda-thread-count
       --password PASS        Password to hash in --compute mode
       --hashfile FILE        Read HASH or USER:HASH lines from FILE
       --mt N                 Number of cracking threads; default is CPU cores
       --engine NAME         Cracking engine: mt, cuda, metal, or auto
+      --cuda-batch-size N   CUDA candidates processed per batch
+      --cuda-thread-count N CUDA threads per block; multiple of 32
       --charset NAME|TEXT    Charset for length-based brute force
                              Built-ins:
                                full (default) - all 40 DST-valid chars,
@@ -462,6 +470,8 @@ Config parse_args(int argc, char** argv, std::vector<std::string>& positional) {
             cfg.help = true;
         } else if (arg == "--verify") {
             cfg.verify = true;
+        } else if (arg == "--benchmark") {
+            cfg.benchmark = true;
         } else if (arg == "--compute") {
             cfg.compute = true;
         } else if (arg == "--status") {
@@ -481,6 +491,10 @@ Config parse_args(int argc, char** argv, std::vector<std::string>& positional) {
             cfg.mt_explicit = true;
         } else if (arg == "--engine") {
             cfg.engine = need_value(arg.c_str());
+        } else if (arg == "--cuda-batch-size") {
+            cfg.cuda_batch_size = static_cast<std::size_t>(std::stoull(need_value(arg.c_str())));
+        } else if (arg == "--cuda-thread-count") {
+            cfg.cuda_thread_count = static_cast<unsigned int>(std::stoul(need_value(arg.c_str())));
         } else if (arg == "--charset") {
             cfg.charset = need_value(arg.c_str());
         } else if (arg == "--mask") {
@@ -746,6 +760,16 @@ std::string cuda_banner() {
     return std::string("cuda: ") + cuda_backend::device_description();
 }
 
+void apply_cuda_launch_config(const Config& cfg) {
+    if (cfg.cuda_batch_size == 0 && cfg.cuda_thread_count == 0) {
+        return;
+    }
+
+    const std::size_t batch = cfg.cuda_batch_size == 0 ? cuda_backend::batch_size() : cfg.cuda_batch_size;
+    const unsigned int threads = cfg.cuda_thread_count == 0 ? cuda_backend::thread_count() : cfg.cuda_thread_count;
+    cuda_backend::set_launch_config(batch, threads);
+}
+
 std::string resolve_engine(const Config& cfg) {
     if (cfg.engine == "auto") {
         if (metal_backend::available()) {
@@ -757,6 +781,29 @@ std::string resolve_engine(const Config& cfg) {
         return "mt";
     }
     return cfg.engine;
+}
+
+int run_cuda_benchmark(const Config& cfg) {
+    if (!cuda_backend::compiled()) {
+        throw std::runtime_error("CUDA benchmark requested but CUDA support is not compiled in");
+    }
+    if (!cuda_backend::available()) {
+        throw std::runtime_error("CUDA benchmark requested but CUDA is not available at runtime: " +
+                                 cuda_backend::device_description());
+    }
+
+    apply_cuda_launch_config(cfg);
+    const cuda_backend::BenchmarkResult result = cuda_backend::benchmark();
+
+    std::cout << "cuda benchmark:\n"
+              << "  batch size: " << result.batch_size << '\n'
+              << "  thread count: " << result.thread_count << '\n'
+              << "  throughput: " << format_rate(result.candidates_per_second) << " c/s\n"
+              << "  suggested command: "
+              << "ibmbrute --engine cuda --cuda-batch-size " << result.batch_size
+              << " --cuda-thread-count " << result.thread_count
+              << " --user USER --target HASH [options]\n";
+    return 0;
 }
 
 std::uint64_t total_candidates(const std::vector<Pattern>& plan) {
@@ -1361,6 +1408,10 @@ int main(int argc, char** argv) {
             return verify_note_vectors() ? 0 : 1;
         }
 
+        if (cfg.benchmark) {
+            return run_cuda_benchmark(cfg);
+        }
+
         if (cfg.attack_mode != 3) {
             throw std::runtime_error("only attack mode 3 is supported");
         }
@@ -1414,6 +1465,8 @@ int main(int argc, char** argv) {
         const std::string requested_engine = cfg.engine;
         const std::string resolved_engine = resolve_engine(cfg);
         cfg.engine = resolved_engine;
+
+        apply_cuda_launch_config(cfg);
 
         if (cfg.engine != "mt" && cfg.engine != "metal" && cfg.engine != "cuda") {
             throw std::runtime_error("unknown engine: " + cfg.engine);

@@ -23,14 +23,23 @@ struct PlanData {
     std::vector<std::uint8_t> charset_bytes;
 };
 
+struct BenchmarkResult {
+    std::size_t batch_size = 0;
+    unsigned int thread_count = 0;
+    double candidates_per_second = 0.0;
+};
+
 bool compiled();
 bool available();
 std::string device_description();
 std::size_t batch_size();
+unsigned int thread_count();
+void set_launch_config(std::size_t batch_size, unsigned int thread_count);
 void prepare_target(const PlanData& plan, const dst::Block8& user_key, const dst::Block8& target);
 std::vector<std::size_t> crack_batch_matches(std::uint64_t batch_start,
                                              std::size_t candidate_count,
                                              bool keep_going);
+BenchmarkResult benchmark();
 
 }  // namespace cuda_backend
 #else
@@ -65,12 +74,29 @@ struct PlanData {
     std::vector<std::uint8_t> charset_bytes;
 };
 
+struct BenchmarkResult {
+    std::size_t batch_size = 0;
+    unsigned int thread_count = 0;
+    double candidates_per_second = 0.0;
+};
+
+inline unsigned int thread_count() {
+    return 0;
+}
+
+inline void set_launch_config(std::size_t, unsigned int) {
+}
+
 inline void prepare_target(const PlanData&, const dst::Block8&, const dst::Block8&) {
 }
 
 inline std::vector<std::size_t> crack_batch_matches(std::uint64_t,
                                                     std::size_t,
                                                     bool) {
+    return {};
+}
+
+inline BenchmarkResult benchmark() {
     return {};
 }
 
