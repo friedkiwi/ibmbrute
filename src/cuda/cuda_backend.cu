@@ -165,6 +165,15 @@ struct DeviceBuffer {
     }
 };
 
+template <typename T>
+void free_device_buffer(DeviceBuffer<T>& buffer)
+{
+    if (buffer.ptr != nullptr) {
+        cudaFree(buffer.ptr);
+        buffer.ptr = nullptr;
+    }
+}
+
 struct CudaState {
     DeviceBuffer<unsigned char> user_key;
     DeviceBuffer<unsigned char> target;
@@ -269,22 +278,15 @@ void reset_state_buffers()
 {
     CudaState& s = state();
 
-    auto free_buffer = [](auto& buffer) {
-        if (buffer.ptr != nullptr) {
-            cudaFree(buffer.ptr);
-            buffer.ptr = nullptr;
-        }
-    };
-
-    free_buffer(s.user_key);
-    free_buffer(s.target);
-    free_buffer(s.matches);
-    free_buffer(s.found_index);
-    free_buffer(s.round_keys);
-    free_buffer(s.patterns);
-    free_buffer(s.charset_offsets);
-    free_buffer(s.radices);
-    free_buffer(s.charset_bytes);
+    free_device_buffer(s.user_key);
+    free_device_buffer(s.target);
+    free_device_buffer(s.matches);
+    free_device_buffer(s.found_index);
+    free_device_buffer(s.round_keys);
+    free_device_buffer(s.patterns);
+    free_device_buffer(s.charset_offsets);
+    free_device_buffer(s.radices);
+    free_device_buffer(s.charset_bytes);
 
     s.match_capacity = 0;
     s.pattern_capacity = 0;
