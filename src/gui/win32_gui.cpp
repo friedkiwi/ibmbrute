@@ -40,7 +40,6 @@ struct AppState {
     HWND hash_edit = nullptr;
     HWND progress_bar = nullptr;
     HWND crack_button = nullptr;
-    HFONT monospace_font = nullptr;
     std::vector<cuda_backend::DeviceInfo> devices;
     std::thread worker;
     std::atomic<std::uint64_t> processed{0};
@@ -376,15 +375,6 @@ INT_PTR CALLBACK dialog_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_p
             SendMessageW(state->hash_edit, EM_LIMITTEXT, 16, 0);
             SendMessageW(state->progress_bar, PBM_SETRANGE32, 0, 1000);
 
-            state->monospace_font =
-                CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                            FIXED_PITCH | FF_MODERN, L"Consolas");
-            if (state->monospace_font != nullptr) {
-                SendMessageW(state->username_edit, WM_SETFONT, reinterpret_cast<WPARAM>(state->monospace_font), TRUE);
-                SendMessageW(state->hash_edit, WM_SETFONT, reinterpret_cast<WPARAM>(state->monospace_font), TRUE);
-            }
-
             state->devices = cuda_backend::devices();
             if (state->devices.empty()) {
                 show_message(hwnd,
@@ -473,13 +463,6 @@ INT_PTR CALLBACK dialog_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_p
             }
 
             EndDialog(hwnd, 0);
-            return TRUE;
-
-        case WM_DESTROY:
-            if (state != nullptr && state->monospace_font != nullptr) {
-                DeleteObject(state->monospace_font);
-                state->monospace_font = nullptr;
-            }
             return TRUE;
     }
 

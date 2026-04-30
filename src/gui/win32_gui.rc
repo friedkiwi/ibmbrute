@@ -1,22 +1,113 @@
-#include "gui_resources.h"
+// Microsoft Visual C++ generated resource script.
+//
+#include "resource.h"
+/////////////////////////////////////////////////////////////////////////////
+// English (United Kingdom) resources
 
-#define RT_MANIFEST 24
-#define CREATEPROCESS_MANIFEST_RESOURCE_ID 1
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENG)
+#pragma code_page(1252)
 
-IDD_MAIN_DIALOG DIALOGEX 0, 0, 246, 124
-STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_CAPTION | WS_MINIMIZEBOX | WS_SYSMENU
-CAPTION "ibmbrute GPU"
-FONT 9, "Segoe UI"
+#ifdef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// TEXTINCLUDE
+//
+
+1 TEXTINCLUDE 
 BEGIN
-    LTEXT           "GPU:", -1, 14, 14, 24, 8
-    COMBOBOX        IDC_GPU_COMBO, 40, 11, 122, 72, CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL
-    PUSHBUTTON      "Configure parameters...", IDC_CONFIGURE_BUTTON, 168, 10, 64, 14, WS_TABSTOP
-    LTEXT           "Username:", -1, 14, 40, 42, 8
-    EDITTEXT        IDC_USERNAME_EDIT, 60, 37, 172, 14, ES_AUTOHSCROLL | WS_TABSTOP
-    LTEXT           "Hash:", -1, 14, 62, 42, 8
-    EDITTEXT        IDC_HASH_EDIT, 60, 59, 172, 14, ES_AUTOHSCROLL | ES_UPPERCASE | WS_TABSTOP
-    CONTROL         "", IDC_PROGRESS_BAR, "msctls_progress32", WS_TABSTOP, 14, 94, 154, 14
-    DEFPUSHBUTTON   "Crack", IDC_CRACK_BUTTON, 176, 93, 56, 14, WS_TABSTOP
+    "resource.h\0"
 END
 
-CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "ibmbrute-gui.manifest"
+2 TEXTINCLUDE 
+BEGIN
+    "\0"
+END
+
+3 TEXTINCLUDE 
+BEGIN
+    "\r\n"
+    "\0"
+END
+
+#endif    // APSTUDIO_INVOKED
+
+#endif    // English (United Kingdom) resources
+/////////////////////////////////////////////////////////////////////////////
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Neutral (Default) (unknown sub-lang: 0x8) resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ZZZ)
+#pragma code_page(1252)
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Dialog
+//
+
+IDD_MAIN_DIALOG DIALOGEX 0, 0, 448, 123
+STYLE DS_MODALFRAME | DS_CENTER | WS_MINIMIZEBOX | WS_CAPTION | WS_SYSMENU
+CAPTION "ibmbrute-win32"
+BEGIN
+    LTEXT           "GPU:",-1,14,14,24,8
+    COMBOBOX        IDC_GPU_COMBO,40,11,191,72,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Configure...",IDC_CONFIGURE_BUTTON,238,10,64,14
+    LTEXT           "Username:",-1,14,40,42,8
+    EDITTEXT        IDC_USERNAME_EDIT,60,37,96,14,ES_AUTOHSCROLL
+    LTEXT           "Hash:",-1,166,41,42,8
+    EDITTEXT        IDC_HASH_EDIT,192,37,96,14,ES_UPPERCASE | ES_AUTOHSCROLL
+    CONTROL         "",IDC_PROGRESS_BAR,"msctls_progress32",WS_TABSTOP,15,61,154,14
+    DEFPUSHBUTTON   "Crack",IDC_CRACK_BUTTON,176,93,56,14
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// RT_MANIFEST
+//
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST             "ibmbrute-gui.manifest"
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// DESIGNINFO
+//
+
+#ifdef APSTUDIO_INVOKED
+GUIDELINES DESIGNINFO
+BEGIN
+    IDD_MAIN_DIALOG, DIALOG
+    BEGIN
+        RIGHTMARGIN, 246
+    END
+END
+#endif    // APSTUDIO_INVOKED
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// AFX_DIALOG_LAYOUT
+//
+
+IDD_MAIN_DIALOG AFX_DIALOG_LAYOUT
+BEGIN
+    0
+END
+
+#endif    // Neutral (Default) (unknown sub-lang: 0x8) resources
+/////////////////////////////////////////////////////////////////////////////
+
+
+
+#ifndef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 3 resource.
+//
+
+
+/////////////////////////////////////////////////////////////////////////////
+#endif    // not APSTUDIO_INVOKED
+
