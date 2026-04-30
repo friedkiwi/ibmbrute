@@ -632,7 +632,7 @@ BenchmarkResult benchmark()
 
     const std::vector<unsigned int> thread_candidates = {128, 256, 384, 512, 640, 768, 896, 1024};
     const std::vector<std::size_t> batch_candidates =
-        {8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304};
+        {8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216};
 
     PlanData plan;
     PlanPattern pattern;
