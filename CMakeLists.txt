@@ -5,6 +5,10 @@ project(ibmi_bruteforce LANGUAGES CXX)
 add_executable(ibmbrute
     src/main.cpp
     src/dst_hash.cpp
+    src/app/app_util.cpp
+    src/app/session.cpp
+    src/app/cracker.cpp
+    src/app/run.cpp
 )
 
 target_compile_features(ibmbrute PRIVATE cxx_std_17)
