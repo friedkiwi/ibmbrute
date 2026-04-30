@@ -148,13 +148,26 @@ struct DeviceBuffer {
 };
 
 struct CudaState {
-    DeviceBuffer<unsigned char> passwords;
     DeviceBuffer<unsigned char> user_key;
     DeviceBuffer<unsigned char> target;
     DeviceBuffer<unsigned int> matches;
-    std::size_t password_capacity = 0;
+    DeviceBuffer<unsigned int> found_index;
+    DeviceBuffer<unsigned long long> round_keys;
+    DeviceBuffer<PlanPattern> patterns;
+    DeviceBuffer<unsigned int> charset_offsets;
+    DeviceBuffer<unsigned int> radices;
+    DeviceBuffer<unsigned char> charset_bytes;
     std::size_t match_capacity = 0;
+    std::size_t pattern_capacity = 0;
+    std::size_t charset_offset_capacity = 0;
+    std::size_t radix_capacity = 0;
+    std::size_t charset_byte_capacity = 0;
+    std::size_t pattern_count = 0;
+    std::size_t charset_offset_count = 0;
+    std::size_t radix_count = 0;
+    std::size_t charset_byte_count = 0;
     bool scalar_buffers_ready = false;
+    bool target_prepared = false;
 };
 
 CudaState& state()
@@ -207,6 +220,9 @@ bool probe_device(cudaDeviceProp* prop, std::string* error)
 template <typename T>
 void ensure_capacity(DeviceBuffer<T>& buffer, std::size_t& capacity, std::size_t required, const char* action)
 {
+    if (required == 0) {
+        return;
+    }
     if (capacity >= required && buffer.ptr != nullptr) {
         return;
     }
@@ -222,13 +238,41 @@ void ensure_capacity(DeviceBuffer<T>& buffer, std::size_t& capacity, std::size_t
 void ensure_buffers(std::size_t password_bytes, std::size_t match_bytes)
 {
     CudaState& s = state();
-    ensure_capacity(s.passwords, s.password_capacity, password_bytes, "failed to allocate CUDA password buffer");
     ensure_capacity(s.matches, s.match_capacity, match_bytes, "failed to allocate CUDA match buffer");
     if (!s.scalar_buffers_ready) {
         check_cuda(cudaMalloc(&s.user_key.ptr, sizeof(dst::Block8)), "failed to allocate CUDA user buffer");
         check_cuda(cudaMalloc(&s.target.ptr, sizeof(dst::Block8)), "failed to allocate CUDA target buffer");
+        check_cuda(cudaMalloc(&s.round_keys.ptr, 16 * sizeof(unsigned long long)),
+                   "failed to allocate CUDA round-key buffer");
+        check_cuda(cudaMalloc(&s.found_index.ptr, sizeof(unsigned int)),
+                   "failed to allocate CUDA found-index buffer");
         s.scalar_buffers_ready = true;
     }
+}
+
+void ensure_plan_buffers(const PlanData& plan)
+{
+    CudaState& s = state();
+    ensure_capacity(s.patterns,
+                    s.pattern_capacity,
+                    plan.patterns.size() * sizeof(PlanPattern),
+                    "failed to allocate CUDA pattern buffer");
+    ensure_capacity(s.charset_offsets,
+                    s.charset_offset_capacity,
+                    plan.charset_offsets.size() * sizeof(unsigned int),
+                    "failed to allocate CUDA charset-offset buffer");
+    ensure_capacity(s.radices,
+                    s.radix_capacity,
+                    plan.radices.size() * sizeof(unsigned int),
+                    "failed to allocate CUDA radix buffer");
+    ensure_capacity(s.charset_bytes,
+                    s.charset_byte_capacity,
+                    plan.charset_bytes.size() * sizeof(unsigned char),
+                    "failed to allocate CUDA charset buffer");
+    s.pattern_count = plan.patterns.size();
+    s.charset_offset_count = plan.charset_offsets.size();
+    s.radix_count = plan.radices.size();
+    s.charset_byte_count = plan.charset_bytes.size();
 }
 
 __device__ __forceinline__ unsigned long long permute(unsigned long long input,
@@ -280,10 +324,8 @@ __device__ __forceinline__ unsigned int feistel(unsigned int value,
     return static_cast<unsigned int>(permute(static_cast<unsigned long long>(substituted) << 32, kP, 32, 64));
 }
 
-__device__ __forceinline__ unsigned long long des_encrypt(unsigned long long key, unsigned long long block)
+__device__ __forceinline__ void build_round_keys(unsigned long long key, unsigned long long* round_keys)
 {
-    unsigned long long round_keys[16];
-
     const unsigned long long pc1 = permute(key, kPC1, 56, 64);
     unsigned long long c = (pc1 >> 28) & 0x0fffffffull;
     unsigned long long d = pc1 & 0x0fffffffull;
@@ -294,7 +336,11 @@ __device__ __forceinline__ unsigned long long des_encrypt(unsigned long long key
         const unsigned long long cd = (c << 28) | d;
         round_keys[round] = permute(cd << 8, kPC2, 48, 64);
     }
+}
 
+__device__ __forceinline__ unsigned long long des_encrypt_with_round_keys(const unsigned long long* round_keys,
+                                                                          unsigned long long block)
+{
     const unsigned long long state = permute(block, kIP, 64, 64);
     unsigned int left = static_cast<unsigned int>(state >> 32);
     unsigned int right = static_cast<unsigned int>(state & 0xffffffffull);
@@ -311,22 +357,88 @@ __device__ __forceinline__ unsigned long long des_encrypt(unsigned long long key
     return permute(preoutput, kFP, 64, 64);
 }
 
-__global__ void dst_kernel(const unsigned char* passwords,
-                           const unsigned char* user_key,
+__device__ __forceinline__ unsigned long long build_candidate_block(const PlanPattern* patterns,
+                                                                    unsigned int pattern_count,
+                                                                    const unsigned int* charset_offsets,
+                                                                    const unsigned int* radices,
+                                                                    const unsigned char* charset_bytes,
+                                                                    unsigned long long global_index)
+{
+    unsigned char password_bytes[8];
+    for (unsigned int i = 0; i < 8; ++i) {
+        password_bytes[i] = 0x40u;
+    }
+
+    PlanPattern pattern = patterns[0];
+    for (unsigned int i = 0; i < pattern_count; ++i) {
+        const unsigned long long pattern_start = patterns[i].start;
+        const unsigned long long next_start = (i + 1u < pattern_count) ? patterns[i + 1u].start
+                                                                        : 0xffffffffffffffffull;
+        if (global_index >= pattern_start && global_index < next_start) {
+            pattern = patterns[i];
+            global_index -= pattern_start;
+            break;
+        }
+    }
+
+    for (int pos = static_cast<int>(pattern.length) - 1; pos >= 0; --pos) {
+        const unsigned int plan_index = pattern.offset_index + static_cast<unsigned int>(pos);
+        const unsigned int radix = radices[plan_index];
+        const unsigned int digit = static_cast<unsigned int>(global_index % radix);
+        global_index /= radix;
+        if (pos < 8) {
+            password_bytes[pos] = charset_bytes[charset_offsets[plan_index] + digit];
+        }
+    }
+
+    return load_be64(password_bytes);
+}
+
+__global__ void init_round_keys_kernel(const unsigned char* user_key, unsigned long long* round_keys)
+{
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        build_round_keys(load_be64(user_key), round_keys);
+    }
+}
+
+__global__ void dst_kernel(const PlanPattern* patterns,
+                           unsigned int pattern_count,
+                           const unsigned int* charset_offsets,
+                           const unsigned int* radices,
+                           const unsigned char* charset_bytes,
+                           const unsigned long long* round_keys,
                            const unsigned char* target,
                            unsigned int* matches,
+                           unsigned int* found_index,
+                           unsigned long long batch_start,
+                           unsigned int collect_all,
                            unsigned int count)
 {
     const unsigned int gid = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (gid >= count) {
         return;
     }
+    if (collect_all == 0u && *found_index != 0xffffffffu) {
+        return;
+    }
 
-    const unsigned long long key = load_be64(user_key);
-    const unsigned long long password_block = load_be64(passwords + (gid * 8u));
+    const unsigned long long password_block =
+        build_candidate_block(patterns, pattern_count, charset_offsets, radices, charset_bytes, batch_start + gid);
     const unsigned long long target_block = load_be64(target);
-    const unsigned long long hash = des_encrypt(key, password_block);
-    matches[gid] = (hash == target_block) ? 1u : 0u;
+    const unsigned long long hash = des_encrypt_with_round_keys(round_keys, password_block);
+
+    if (hash != target_block) {
+        if (collect_all != 0u) {
+            matches[gid] = 0u;
+        }
+        return;
+    }
+
+    if (collect_all != 0u) {
+        matches[gid] = 1u;
+    } else {
+        atomicMin(found_index, gid);
+    }
 }
 
 }  // namespace
@@ -362,31 +474,13 @@ std::size_t batch_size()
     return kBatchSize;
 }
 
-std::vector<std::size_t> crack_batch_matches(const std::vector<dst::Block8>& encoded_passwords,
-                                             const dst::Block8& user_key,
-                                             const dst::Block8& target)
+void prepare_target(const PlanData& plan, const dst::Block8& user_key, const dst::Block8& target)
 {
-    if (encoded_passwords.empty()) {
-        return {};
-    }
-    if (encoded_passwords.size() > static_cast<std::size_t>(std::numeric_limits<unsigned int>::max())) {
-        throw std::runtime_error("CUDA batch is too large");
-    }
-
     check_cuda(cudaSetDevice(0), "failed to select CUDA device");
-
-    const std::size_t candidate_count = encoded_passwords.size();
-    const std::size_t key_bytes = candidate_count * sizeof(dst::Block8);
-    const std::size_t match_bytes = candidate_count * sizeof(unsigned int);
+    ensure_buffers(0, 0);
+    ensure_plan_buffers(plan);
 
     CudaState& s = state();
-    ensure_buffers(key_bytes, match_bytes);
-
-    check_cuda(cudaMemcpy(s.passwords.ptr,
-                          encoded_passwords.data(),
-                          key_bytes,
-                          cudaMemcpyHostToDevice),
-               "failed to upload CUDA password buffer");
     check_cuda(cudaMemcpy(s.user_key.ptr,
                           user_key.data(),
                           user_key.size(),
@@ -397,28 +491,104 @@ std::vector<std::size_t> crack_batch_matches(const std::vector<dst::Block8>& enc
                           target.size(),
                           cudaMemcpyHostToDevice),
                "failed to upload CUDA target buffer");
+    check_cuda(cudaMemcpy(s.patterns.ptr,
+                          plan.patterns.data(),
+                          plan.patterns.size() * sizeof(PlanPattern),
+                          cudaMemcpyHostToDevice),
+               "failed to upload CUDA pattern buffer");
+    check_cuda(cudaMemcpy(s.charset_offsets.ptr,
+                          plan.charset_offsets.data(),
+                          plan.charset_offsets.size() * sizeof(unsigned int),
+                          cudaMemcpyHostToDevice),
+               "failed to upload CUDA charset-offset buffer");
+    check_cuda(cudaMemcpy(s.radices.ptr,
+                          plan.radices.data(),
+                          plan.radices.size() * sizeof(unsigned int),
+                          cudaMemcpyHostToDevice),
+               "failed to upload CUDA radix buffer");
+    check_cuda(cudaMemcpy(s.charset_bytes.ptr,
+                          plan.charset_bytes.data(),
+                          plan.charset_bytes.size() * sizeof(unsigned char),
+                          cudaMemcpyHostToDevice),
+               "failed to upload CUDA charset buffer");
+
+    init_round_keys_kernel<<<1, 1>>>(s.user_key.ptr, s.round_keys.ptr);
+    check_cuda(cudaGetLastError(), "failed to launch CUDA round-key kernel");
+    check_cuda(cudaDeviceSynchronize(), "failed to build CUDA round keys");
+    s.target_prepared = true;
+}
+
+std::vector<std::size_t> crack_batch_matches(std::uint64_t batch_start,
+                                             std::size_t candidate_count,
+                                             bool keep_going)
+{
+    if (candidate_count == 0) {
+        return {};
+    }
+    if (candidate_count > static_cast<std::size_t>(std::numeric_limits<unsigned int>::max())) {
+        throw std::runtime_error("CUDA batch is too large");
+    }
+
+    check_cuda(cudaSetDevice(0), "failed to select CUDA device");
+
+    CudaState& s = state();
+    if (!s.target_prepared) {
+        throw std::runtime_error("CUDA target was not prepared before cracking");
+    }
+
+    const std::size_t match_bytes = candidate_count * sizeof(unsigned int);
+    if (keep_going) {
+        ensure_buffers(0, match_bytes);
+    } else {
+        ensure_buffers(0, 0);
+        const unsigned int not_found = 0xffffffffu;
+        check_cuda(cudaMemcpy(s.found_index.ptr,
+                              &not_found,
+                              sizeof(not_found),
+                              cudaMemcpyHostToDevice),
+                   "failed to reset CUDA found-index buffer");
+    }
 
     const unsigned int count = static_cast<unsigned int>(candidate_count);
     const unsigned int block_count = (count + kThreadsPerBlock - 1) / kThreadsPerBlock;
-    dst_kernel<<<block_count, kThreadsPerBlock>>>(s.passwords.ptr,
-                                                  s.user_key.ptr,
+    dst_kernel<<<block_count, kThreadsPerBlock>>>(s.patterns.ptr,
+                                                  static_cast<unsigned int>(s.pattern_count),
+                                                  s.charset_offsets.ptr,
+                                                  s.radices.ptr,
+                                                  s.charset_bytes.ptr,
+                                                  s.round_keys.ptr,
                                                   s.target.ptr,
                                                   s.matches.ptr,
+                                                  s.found_index.ptr,
+                                                  batch_start,
+                                                  keep_going ? 1u : 0u,
                                                   count);
     check_cuda(cudaGetLastError(), "failed to launch CUDA kernel");
     check_cuda(cudaDeviceSynchronize(), "failed to execute CUDA kernel");
 
-    std::vector<unsigned int> matches(candidate_count, 0);
-    check_cuda(cudaMemcpy(matches.data(),
-                          s.matches.ptr,
-                          match_bytes,
-                          cudaMemcpyDeviceToHost),
-               "failed to download CUDA match buffer");
-
     std::vector<std::size_t> match_indices;
-    for (std::size_t i = 0; i < candidate_count; ++i) {
-        if (matches[i] != 0) {
-            match_indices.push_back(i);
+    if (keep_going) {
+        std::vector<unsigned int> matches(candidate_count, 0);
+        check_cuda(cudaMemcpy(matches.data(),
+                              s.matches.ptr,
+                              match_bytes,
+                              cudaMemcpyDeviceToHost),
+                   "failed to download CUDA match buffer");
+
+        for (std::size_t i = 0; i < candidate_count; ++i) {
+            if (matches[i] != 0) {
+                match_indices.push_back(i);
+            }
+        }
+    } else {
+        unsigned int found_index = 0xffffffffu;
+        check_cuda(cudaMemcpy(&found_index,
+                              s.found_index.ptr,
+                              sizeof(found_index),
+                              cudaMemcpyDeviceToHost),
+                   "failed to download CUDA found-index buffer");
+        if (found_index != 0xffffffffu) {
+            match_indices.push_back(found_index);
         }
     }
     return match_indices;

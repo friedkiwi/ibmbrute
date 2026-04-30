@@ -780,6 +780,31 @@ std::string candidate_for_index(const std::vector<Pattern>& plan, std::uint64_t 
     throw std::runtime_error("candidate index out of range");
 }
 
+cuda_backend::PlanData build_cuda_plan(const std::vector<Pattern>& plan) {
+    cuda_backend::PlanData data;
+    std::uint64_t start = 0;
+
+    for (const auto& pattern : plan) {
+        cuda_backend::PlanPattern desc;
+        desc.start = start;
+        desc.length = static_cast<std::uint32_t>(pattern.charsets.size());
+        desc.offset_index = static_cast<std::uint32_t>(data.radices.size());
+
+        for (const auto& charset : pattern.charsets) {
+            data.charset_offsets.push_back(static_cast<std::uint32_t>(data.charset_bytes.size()));
+            data.radices.push_back(static_cast<std::uint32_t>(charset.size()));
+            for (char ch : charset) {
+                data.charset_bytes.push_back(dst::ebcdic8(std::string(1, ch))[0]);
+            }
+        }
+
+        data.patterns.push_back(desc);
+        start += pattern.total;
+    }
+
+    return data;
+}
+
 struct CrackOutcome {
     bool found = false;
     bool interrupted = false;
@@ -1126,8 +1151,8 @@ CrackOutcome crack_target_cuda(const TargetEntry& target,
     }
 
     const dst::Block8 user_block = dst::ebcdic8(target.user);
-    std::vector<dst::Block8> encoded_candidates;
-    encoded_candidates.reserve(batch_limit);
+    const cuda_backend::PlanData cuda_plan = build_cuda_plan(plan);
+    cuda_backend::prepare_target(cuda_plan, user_block, target.target);
     std::vector<std::string> found_passwords;
 
     auto started = std::chrono::steady_clock::now();
@@ -1155,15 +1180,9 @@ CrackOutcome crack_target_cuda(const TargetEntry& target,
         }
 
         const std::uint64_t batch_count = std::min<std::uint64_t>(batch_limit, total_work - processed);
-        encoded_candidates.clear();
-        encoded_candidates.reserve(static_cast<std::size_t>(batch_count));
-        for (std::uint64_t offset = 0; offset < batch_count; ++offset) {
-            encoded_candidates.push_back(dst::ebcdic8(candidate_for_index(plan, processed + offset)));
-        }
-
         const std::uint64_t batch_start = processed;
         const std::vector<std::size_t> match_indices =
-            cuda_backend::crack_batch_matches(encoded_candidates, user_block, target.target);
+            cuda_backend::crack_batch_matches(batch_start, static_cast<std::size_t>(batch_count), cfg.keep_going);
         processed += batch_count;
 
         if (!match_indices.empty()) {
