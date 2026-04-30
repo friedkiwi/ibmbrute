@@ -319,7 +319,7 @@ void ensure_capacity(DeviceBuffer<T>& buffer, std::size_t& capacity, std::size_t
     capacity = required;
 }
 
-void ensure_buffers(std::size_t password_bytes, std::size_t match_bytes)
+void ensure_buffers(std::size_t, std::size_t match_bytes)
 {
     CudaState& s = state();
     ensure_capacity(s.matches, s.match_capacity, match_bytes, "failed to allocate CUDA match buffer");
@@ -767,7 +767,7 @@ std::vector<std::size_t> crack_batch_matches(std::uint64_t batch_start,
     return match_indices;
 }
 
-BenchmarkResult benchmark_with_progress(const std::function<bool(const BenchmarkProgress&)>& progress_callback)
+BenchmarkResult benchmark_with_progress(BenchmarkProgressCallback progress_callback, void* progress_context)
 {
     if (!available()) {
         throw std::runtime_error("CUDA benchmark requested but CUDA is not available at runtime");
@@ -802,7 +802,7 @@ BenchmarkResult benchmark_with_progress(const std::function<bool(const Benchmark
 
     for (unsigned int threads : thread_candidates()) {
         for (std::size_t batch : batch_candidates()) {
-            if (progress_callback) {
+            if (progress_callback != nullptr) {
                 BenchmarkProgress progress;
                 progress.completed = completed;
                 progress.total = total_candidates_to_test;
@@ -811,7 +811,7 @@ BenchmarkResult benchmark_with_progress(const std::function<bool(const Benchmark
                 progress.best_batch_size = best.batch_size;
                 progress.best_thread_count = best.thread_count;
                 progress.best_candidates_per_second = best.candidates_per_second;
-                if (!progress_callback(progress)) {
+                if (!progress_callback(progress, progress_context)) {
                     set_launch_config(original_batch, original_threads);
                     return best;
                 }
@@ -851,14 +851,14 @@ BenchmarkResult benchmark_with_progress(const std::function<bool(const Benchmark
         }
     }
 
-    if (progress_callback) {
+    if (progress_callback != nullptr) {
         BenchmarkProgress progress;
         progress.completed = completed;
         progress.total = total_candidates_to_test;
         progress.best_batch_size = best.batch_size;
         progress.best_thread_count = best.thread_count;
         progress.best_candidates_per_second = best.candidates_per_second;
-        static_cast<void>(progress_callback(progress));
+        static_cast<void>(progress_callback(progress, progress_context));
     }
 
     set_launch_config(original_batch, original_threads);
@@ -867,7 +867,7 @@ BenchmarkResult benchmark_with_progress(const std::function<bool(const Benchmark
 
 BenchmarkResult benchmark()
 {
-    return benchmark_with_progress({});
+    return benchmark_with_progress(nullptr, nullptr);
 }
 
 }  // namespace cuda_backend

@@ -85,6 +85,18 @@ void update_controls(DialogState& state)
     set_text(state.best_edit, best_text(state));
 }
 
+bool benchmark_progress_callback(const cuda_backend::BenchmarkProgress& progress, void* context)
+{
+    DialogState* state = static_cast<DialogState*>(context);
+    state->completed.store(progress.completed, std::memory_order_relaxed);
+    state->total.store(progress.total, std::memory_order_relaxed);
+    state->current_batch_size.store(progress.current_batch_size, std::memory_order_relaxed);
+    state->current_thread_count.store(progress.current_thread_count, std::memory_order_relaxed);
+    state->best_batch_size.store(progress.best_batch_size, std::memory_order_relaxed);
+    state->best_thread_count.store(progress.best_thread_count, std::memory_order_relaxed);
+    return !state->cancel_requested.load(std::memory_order_relaxed);
+}
+
 INT_PTR CALLBACK dialog_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param)
 {
     DialogState* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -101,18 +113,9 @@ INT_PTR CALLBACK dialog_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_p
             set_text(state->best_edit, L"Best so far: none");
 
             state->worker = std::thread([hwnd, state]() {
-                auto payload = std::make_unique<BenchmarkResultPayload>();
+                std::unique_ptr<BenchmarkResultPayload> payload(new BenchmarkResultPayload);
                 try {
-                    payload->result = cuda_backend::benchmark_with_progress(
-                        [state](const cuda_backend::BenchmarkProgress& progress) {
-                            state->completed.store(progress.completed, std::memory_order_relaxed);
-                            state->total.store(progress.total, std::memory_order_relaxed);
-                            state->current_batch_size.store(progress.current_batch_size, std::memory_order_relaxed);
-                            state->current_thread_count.store(progress.current_thread_count, std::memory_order_relaxed);
-                            state->best_batch_size.store(progress.best_batch_size, std::memory_order_relaxed);
-                            state->best_thread_count.store(progress.best_thread_count, std::memory_order_relaxed);
-                            return !state->cancel_requested.load(std::memory_order_relaxed);
-                        });
+                    payload->result = cuda_backend::benchmark_with_progress(benchmark_progress_callback, state);
                     payload->cancelled = state->cancel_requested.load(std::memory_order_relaxed);
                 } catch (const std::exception& ex) {
                     payload->error = ex.what();

@@ -548,16 +548,17 @@ void begin_crack(AppState& state)
         set_status_text(state, format_runtime_status(state));
         set_running_state(state, true);
 
-        state.worker = std::thread([hwnd = state.hwnd,
-                                    cfg = std::move(cfg),
-                                    plan = std::move(plan),
+        const HWND hwnd = state.hwnd;
+        state.worker = std::thread([hwnd,
+                                    cfg,
+                                    plan,
                                     target,
                                     fingerprint,
                                     session_path,
                                     start_position,
                                     total_work,
                                     &state]() mutable {
-            auto result = std::make_unique<WorkerResult>();
+            std::unique_ptr<WorkerResult> result(new WorkerResult);
             const auto started = std::chrono::steady_clock::now();
             result->user = target.user;
             result->target_hex = target.target_hex;

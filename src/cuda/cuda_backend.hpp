@@ -4,7 +4,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <string>
 #include <vector>
 
@@ -40,6 +39,8 @@ struct BenchmarkProgress {
     double best_candidates_per_second = 0.0;
 };
 
+typedef bool (*BenchmarkProgressCallback)(const BenchmarkProgress& progress, void* context);
+
 struct DeviceInfo {
     int index = -1;
     std::string name;
@@ -64,7 +65,7 @@ std::vector<std::size_t> crack_batch_matches(std::uint64_t batch_start,
                                              std::size_t candidate_count,
                                              bool keep_going);
 BenchmarkResult benchmark();
-BenchmarkResult benchmark_with_progress(const std::function<bool(const BenchmarkProgress&)>& progress_callback);
+BenchmarkResult benchmark_with_progress(BenchmarkProgressCallback progress_callback, void* progress_context);
 
 }  // namespace cuda_backend
 #else
@@ -115,6 +116,8 @@ struct BenchmarkProgress {
     double best_candidates_per_second = 0.0;
 };
 
+typedef bool (*BenchmarkProgressCallback)(const BenchmarkProgress& progress, void* context);
+
 struct DeviceInfo {
     int index = -1;
     std::string name;
@@ -162,7 +165,7 @@ inline BenchmarkResult benchmark() {
     return {};
 }
 
-inline BenchmarkResult benchmark_with_progress(const std::function<bool(const BenchmarkProgress&)>&) {
+inline BenchmarkResult benchmark_with_progress(BenchmarkProgressCallback, void*) {
     return {};
 }
 
