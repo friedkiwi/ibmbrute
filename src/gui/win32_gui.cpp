@@ -255,12 +255,6 @@ bool validate_inputs(AppState& state, ibmbrute_app::Config& cfg, std::wstring* e
         }
         return false;
     }
-    if (!std::isalpha(static_cast<unsigned char>(username.front()))) {
-        if (error_text != nullptr) {
-            *error_text = L"Username must start with a letter.";
-        }
-        return false;
-    }
     if (!std::all_of(username.begin(), username.end(), [](unsigned char ch) {
             return std::isupper(ch) != 0 || std::isdigit(ch) != 0;
         })) {
