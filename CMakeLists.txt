@@ -91,6 +91,8 @@ ibmbrute_configure_target(ibmbrute)
 if (WIN32 AND IBMBRUTE_HAVE_CUDA_VALUE)
     add_executable(ibmbrute-win32 WIN32
         ${IBMBRUTE_COMMON_SOURCES}
+        src/gui/win32_benchmark_dialog.cpp
+        src/gui/win32_config_dialog.cpp
         src/gui/win32_gui.cpp
         src/gui/win32_gui.rc
     )

@@ -3,6 +3,7 @@
 #include "../dst_hash.hpp"
 
 #include "gui_resources.h"
+#include "win32_config_dialog.hpp"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -12,6 +13,8 @@
 #include <cctype>
 #include <cstdint>
 #include <cwctype>
+#include <chrono>
+#include <iomanip>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -23,6 +26,7 @@ namespace {
 
 constexpr UINT_PTR kProgressTimerId = 1;
 constexpr UINT WM_APP_CRACK_FINISHED = WM_APP + 1;
+constexpr const wchar_t* kRegistryPath = L"Software\\ibmbrute\\win32";
 
 struct WorkerResult {
     ibmbrute_app::CrackOutcome outcome;
@@ -31,6 +35,7 @@ struct WorkerResult {
     std::string target_hex;
     std::string session_path;
     std::uint64_t total_work = 0;
+    double elapsed_seconds = 0.0;
 };
 
 struct AppState {
@@ -39,11 +44,17 @@ struct AppState {
     HWND username_edit = nullptr;
     HWND hash_edit = nullptr;
     HWND progress_bar = nullptr;
+    HWND status_edit = nullptr;
     HWND crack_button = nullptr;
     std::vector<cuda_backend::DeviceInfo> devices;
     std::thread worker;
+    std::vector<ibmbrute_app::Pattern> active_plan;
+    std::string active_user;
+    std::string active_target_hex;
+    ibmbrute_gui::LaunchConfig launch_config;
     std::atomic<std::uint64_t> processed{0};
     std::atomic<std::uint64_t> total_work{0};
+    std::chrono::steady_clock::time_point run_started{};
     bool running = false;
     bool close_when_idle = false;
 };
@@ -96,12 +107,108 @@ void show_message(HWND hwnd, UINT flags, const std::wstring& text, const wchar_t
     MessageBoxW(hwnd, text.c_str(), title, flags);
 }
 
+bool read_registry_dword(const wchar_t* name, DWORD* value)
+{
+    DWORD type = 0;
+    DWORD size = sizeof(*value);
+    return RegGetValueW(HKEY_CURRENT_USER,
+                        kRegistryPath,
+                        name,
+                        RRF_RT_REG_DWORD,
+                        &type,
+                        value,
+                        &size) == ERROR_SUCCESS;
+}
+
+void write_registry_dword(const wchar_t* name, DWORD value)
+{
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER,
+                        kRegistryPath,
+                        0,
+                        nullptr,
+                        REG_OPTION_NON_VOLATILE,
+                        KEY_SET_VALUE,
+                        nullptr,
+                        &key,
+                        nullptr) != ERROR_SUCCESS) {
+        return;
+    }
+
+    RegSetValueExW(key,
+                   name,
+                   0,
+                   REG_DWORD,
+                   reinterpret_cast<const BYTE*>(&value),
+                   static_cast<DWORD>(sizeof(value)));
+    RegCloseKey(key);
+}
+
+void load_persisted_settings(AppState& state)
+{
+    DWORD value = 0;
+    if (read_registry_dword(L"GpuIndex", &value)) {
+        for (std::size_t i = 0; i < state.devices.size(); ++i) {
+            if (state.devices[i].index == static_cast<int>(value)) {
+                SendMessageW(state.gpu_combo, CB_SETCURSEL, static_cast<WPARAM>(i), 0);
+                break;
+            }
+        }
+    }
+
+    if (read_registry_dword(L"CudaBatchSize", &value) && value > 0) {
+        state.launch_config.cuda_batch_size = static_cast<std::size_t>(value);
+    }
+    if (read_registry_dword(L"CudaThreadCount", &value) && value > 0) {
+        state.launch_config.cuda_thread_count = static_cast<unsigned int>(value);
+    }
+}
+
+void persist_gpu_selection(const AppState& state)
+{
+    const int selected = static_cast<int>(SendMessageW(state.gpu_combo, CB_GETCURSEL, 0, 0));
+    if (selected == CB_ERR || selected < 0 || static_cast<std::size_t>(selected) >= state.devices.size()) {
+        return;
+    }
+    write_registry_dword(L"GpuIndex", static_cast<DWORD>(state.devices[static_cast<std::size_t>(selected)].index));
+}
+
+void persist_launch_config(const ibmbrute_gui::LaunchConfig& config)
+{
+    if (config.cuda_batch_size != 0) {
+        write_registry_dword(L"CudaBatchSize", static_cast<DWORD>(config.cuda_batch_size));
+    }
+    if (config.cuda_thread_count != 0) {
+        write_registry_dword(L"CudaThreadCount", static_cast<DWORD>(config.cuda_thread_count));
+    }
+}
+
+void set_status_text(AppState& state, const std::wstring& text)
+{
+    SetWindowTextW(state.status_edit, text.c_str());
+}
+
 std::wstring gpu_label(const cuda_backend::DeviceInfo& device)
 {
     std::wostringstream oss;
     oss << L"GPU " << device.index << L": " << widen_ascii(device.name)
         << L" (SM " << device.major << L'.' << device.minor
         << L", " << (device.total_global_mem / (1024ull * 1024ull)) << L" MiB)";
+    return oss.str();
+}
+
+std::wstring format_elapsed_hms(double seconds)
+{
+    if (seconds < 0) {
+        seconds = 0;
+    }
+    const std::uint64_t total = static_cast<std::uint64_t>(seconds + 0.5);
+    const std::uint64_t hours = total / 3600;
+    const std::uint64_t minutes = (total % 3600) / 60;
+    const std::uint64_t secs = total % 60;
+
+    std::wostringstream oss;
+    oss << hours << L"h " << minutes << L"m " << secs << L"s";
     return oss.str();
 }
 
@@ -133,9 +240,32 @@ bool validate_inputs(AppState& state, ibmbrute_app::Config& cfg, std::wstring* e
         }
         return false;
     }
-    if (username.size() > 8) {
+    std::transform(username.begin(), username.end(), username.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::toupper(ch));
+    });
+    if (username.size() < 3) {
         if (error_text != nullptr) {
-            *error_text = L"Username must be at most 8 characters.";
+            *error_text = L"Username must be at least 3 characters.";
+        }
+        return false;
+    }
+    if (username.size() > 10) {
+        if (error_text != nullptr) {
+            *error_text = L"Username must be at most 10 characters.";
+        }
+        return false;
+    }
+    if (!std::isalpha(static_cast<unsigned char>(username.front()))) {
+        if (error_text != nullptr) {
+            *error_text = L"Username must start with a letter.";
+        }
+        return false;
+    }
+    if (!std::all_of(username.begin(), username.end(), [](unsigned char ch) {
+            return std::isupper(ch) != 0 || std::isdigit(ch) != 0;
+        })) {
+        if (error_text != nullptr) {
+            *error_text = L"Username may only contain A-Z and 0-9.";
         }
         return false;
     }
@@ -189,6 +319,12 @@ bool validate_inputs(AppState& state, ibmbrute_app::Config& cfg, std::wstring* e
     cfg.status = false;
     cfg.user = username;
     cfg.target_hex = hash;
+    if (state.launch_config.cuda_batch_size != 0) {
+        cfg.cuda_batch_size = state.launch_config.cuda_batch_size;
+    }
+    if (state.launch_config.cuda_thread_count != 0) {
+        cfg.cuda_thread_count = state.launch_config.cuda_thread_count;
+    }
     return true;
 }
 
@@ -206,6 +342,40 @@ void set_running_state(AppState& state, bool running)
     }
 }
 
+std::wstring format_runtime_status(AppState& state)
+{
+    const std::uint64_t total = state.total_work.load(std::memory_order_relaxed);
+    const std::uint64_t processed = state.processed.load(std::memory_order_relaxed);
+    if (total == 0) {
+        return L"Idle.";
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(now - state.run_started).count();
+    const double rate = (elapsed > 0.001) ? (static_cast<double>(processed) / elapsed) : 0.0;
+    const double remaining =
+        (rate > 0.0 && total > processed) ? (static_cast<double>(total - processed) / rate) : 0.0;
+
+    std::wstring current = L"done";
+    if (processed < total && !state.active_plan.empty()) {
+        try {
+            current = widen_ascii(ibmbrute_app::candidate_for_index(state.active_plan, processed));
+        } catch (const std::exception&) {
+            current = L"?";
+        }
+    }
+
+    std::wostringstream oss;
+    oss << L"progress " << widen_ascii(ibmbrute_app::format_number(processed))
+        << L"/" << widen_ascii(ibmbrute_app::format_number(total))
+        << L" (" << std::fixed << std::setprecision(2)
+        << (100.0 * static_cast<double>(processed) / static_cast<double>(total)) << L"%) "
+        << widen_ascii(ibmbrute_app::format_rate(rate)) << L" c/s eta "
+        << widen_ascii(ibmbrute_app::format_duration(remaining))
+        << L" current=" << current;
+    return oss.str();
+}
+
 void update_crack_button_enabled(AppState& state)
 {
     if (state.running) {
@@ -214,7 +384,16 @@ void update_crack_button_enabled(AppState& state)
     }
 
     ibmbrute_app::Config cfg;
-    EnableWindow(state.crack_button, validate_inputs(state, cfg, nullptr) ? TRUE : FALSE);
+    std::wstring error_text;
+    const bool valid = validate_inputs(state, cfg, &error_text);
+    EnableWindow(state.crack_button, valid ? TRUE : FALSE);
+    if (valid) {
+        set_status_text(state, L"Ready.");
+    } else if (!error_text.empty()) {
+        set_status_text(state, error_text);
+    } else {
+        set_status_text(state, L"Enter parameters.");
+    }
 }
 
 void update_progress_bar(AppState& state)
@@ -237,22 +416,29 @@ void finish_worker(AppState& state, std::unique_ptr<WorkerResult> result)
     update_crack_button_enabled(state);
 
     if (!result->error.empty()) {
+        set_status_text(state, widen_ascii(result->error));
         show_message(state.hwnd, MB_ICONERROR | MB_OK, widen_ascii(result->error), L"ibmbrute GPU");
     } else if (result->outcome.interrupted) {
+        set_status_text(state, L"Cracking stopped. Session state was saved.");
         show_message(state.hwnd,
                      MB_ICONINFORMATION | MB_OK,
                      L"Cracking stopped. Session state was saved.",
                      L"ibmbrute GPU");
     } else if (result->outcome.found && !result->outcome.passwords.empty()) {
-        const std::wstring message = L"Match found:\n\n" + widen_ascii(result->user) + L":" +
-                                     widen_ascii(result->outcome.passwords.front()) + L" -> " +
-                                     widen_ascii(result->target_hex);
+        const std::wstring message = L"Match found for user " + widen_ascii(result->user) +
+                                     L" and hash " + widen_ascii(result->target_hex) + L" in " +
+                                     format_elapsed_hms(result->elapsed_seconds) + L" -> " +
+                                     widen_ascii(result->outcome.passwords.front());
+        set_status_text(state, message);
         show_message(state.hwnd, MB_ICONINFORMATION | MB_OK, message, L"ibmbrute GPU");
     } else {
         std::wostringstream oss;
         oss << L"No match in " << widen_ascii(ibmbrute_app::format_number(result->total_work)) << L" candidates.";
+        set_status_text(state, oss.str());
         show_message(state.hwnd, MB_ICONINFORMATION | MB_OK, oss.str(), L"ibmbrute GPU");
     }
+
+    state.active_plan.clear();
 
     if (state.close_when_idle) {
         EndDialog(state.hwnd, 0);
@@ -274,6 +460,7 @@ void begin_crack(AppState& state)
 
     try {
         cuda_backend::select_device(device.index);
+        ibmbrute_app::apply_cuda_launch_config(cfg);
         const std::string fingerprint = ibmbrute_app::session_fingerprint(cfg);
         const std::string session_path = ibmbrute_app::resolve_session_path(cfg);
         const std::vector<ibmbrute_app::Pattern> plan = ibmbrute_app::build_plan_from_config(cfg);
@@ -302,9 +489,14 @@ void begin_crack(AppState& state)
         }
 
         ibmbrute_app::g_stop = 0;
+        state.active_plan = plan;
+        state.active_user = targets.front().user;
+        state.active_target_hex = targets.front().target_hex;
         state.processed.store(start_position, std::memory_order_relaxed);
         state.total_work.store(total_work, std::memory_order_relaxed);
+        state.run_started = std::chrono::steady_clock::now();
         update_progress_bar(state);
+        set_status_text(state, format_runtime_status(state));
         set_running_state(state, true);
 
         const ibmbrute_app::TargetEntry target = targets.front();
@@ -318,6 +510,7 @@ void begin_crack(AppState& state)
                                     total_work,
                                     &state]() mutable {
             auto result = std::make_unique<WorkerResult>();
+            const auto started = std::chrono::steady_clock::now();
             result->user = target.user;
             result->target_hex = target.target_hex;
             result->session_path = session_path;
@@ -343,6 +536,7 @@ void begin_crack(AppState& state)
             } catch (const std::exception& ex) {
                 result->error = ex.what();
             }
+            result->elapsed_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 
             PostMessageW(hwnd,
                          WM_APP_CRACK_FINISHED,
@@ -369,9 +563,10 @@ INT_PTR CALLBACK dialog_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_p
             state->username_edit = GetDlgItem(hwnd, IDC_USERNAME_EDIT);
             state->hash_edit = GetDlgItem(hwnd, IDC_HASH_EDIT);
             state->progress_bar = GetDlgItem(hwnd, IDC_PROGRESS_BAR);
+            state->status_edit = GetDlgItem(hwnd, IDC_STATUS_EDIT);
             state->crack_button = GetDlgItem(hwnd, IDC_CRACK_BUTTON);
 
-            SendMessageW(state->username_edit, EM_LIMITTEXT, 8, 0);
+            SendMessageW(state->username_edit, EM_LIMITTEXT, 10, 0);
             SendMessageW(state->hash_edit, EM_LIMITTEXT, 16, 0);
             SendMessageW(state->progress_bar, PBM_SETRANGE32, 0, 1000);
 
@@ -390,6 +585,7 @@ INT_PTR CALLBACK dialog_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_p
                 SendMessageW(state->gpu_combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
             }
             SendMessageW(state->gpu_combo, CB_SETCURSEL, 0, 0);
+            load_persisted_settings(*state);
             update_progress_bar(*state);
             update_crack_button_enabled(*state);
             return TRUE;
@@ -401,10 +597,9 @@ INT_PTR CALLBACK dialog_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_p
             }
             switch (LOWORD(w_param)) {
                 case IDC_CONFIGURE_BUTTON:
-                    show_message(hwnd,
-                                 MB_ICONINFORMATION | MB_OK,
-                                 L"TODO: GPU launch parameter configuration is not implemented yet.",
-                                 L"ibmbrute GPU");
+                    if (show_config_dialog(hwnd, state->launch_config)) {
+                        persist_launch_config(state->launch_config);
+                    }
                     return TRUE;
 
                 case IDC_CRACK_BUTTON:
@@ -424,6 +619,9 @@ INT_PTR CALLBACK dialog_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_p
                 case IDC_HASH_EDIT:
                 case IDC_GPU_COMBO:
                     if (HIWORD(w_param) == EN_CHANGE || HIWORD(w_param) == CBN_SELCHANGE) {
+                        if (LOWORD(w_param) == IDC_GPU_COMBO) {
+                            persist_gpu_selection(*state);
+                        }
                         update_crack_button_enabled(*state);
                     }
                     return TRUE;
@@ -433,6 +631,7 @@ INT_PTR CALLBACK dialog_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_p
         case WM_TIMER:
             if (state != nullptr && w_param == kProgressTimerId) {
                 update_progress_bar(*state);
+                set_status_text(*state, format_runtime_status(*state));
                 return TRUE;
             }
             break;

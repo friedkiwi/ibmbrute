@@ -1,57 +1,6 @@
 #ifndef IBMBRUTE_GUI_RESOURCES_H
 #define IBMBRUTE_GUI_RESOURCES_H
 
-#define IDD_MAIN_DIALOG 101
-
-#define IDC_GPU_COMBO 1001
-#define IDC_CONFIGURE_BUTTON 1002
-#define IDC_USERNAME_EDIT 1003
-#define IDC_HASH_EDIT 1004
-#define IDC_PROGRESS_BAR 1005
-#define IDC_CRACK_BUTTON 1006
-
-#ifndef DS_SETFONT
-#define DS_SETFONT 0x00000040L
-#endif
-
-#ifndef DS_MODALFRAME
-#define DS_MODALFRAME 0x00000080L
-#endif
-
-#ifndef DS_CENTER
-#define DS_CENTER 0x00000800L
-#endif
-
-#ifndef WS_CAPTION
-#define WS_CAPTION 0x00C00000L
-#endif
-
-#ifndef WS_MINIMIZEBOX
-#define WS_MINIMIZEBOX 0x00020000L
-#endif
-
-#ifndef WS_SYSMENU
-#define WS_SYSMENU 0x00080000L
-#endif
-
-#ifndef WS_TABSTOP
-#define WS_TABSTOP 0x00010000L
-#endif
-
-#ifndef WS_VSCROLL
-#define WS_VSCROLL 0x00200000L
-#endif
-
-#ifndef ES_AUTOHSCROLL
-#define ES_AUTOHSCROLL 0x00000080L
-#endif
-
-#ifndef ES_UPPERCASE
-#define ES_UPPERCASE 0x00000008L
-#endif
-
-#ifndef CBS_DROPDOWNLIST
-#define CBS_DROPDOWNLIST 0x0003L
-#endif
+#include "resource.h"
 
 #endif

@@ -15,6 +15,22 @@ namespace cuda_backend {
 
 namespace {
 
+const std::vector<unsigned int>& thread_candidates()
+{
+    static const std::vector<unsigned int> values = {128, 192, 256, 320, 384, 448, 512, 576,
+                                                     640, 704, 768, 832, 896, 960, 1024};
+    return values;
+}
+
+const std::vector<std::size_t>& batch_candidates()
+{
+    static const std::vector<std::size_t> values =
+        {8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608, 262144, 393216,
+         524288, 786432, 1048576, 1572864, 2097152, 3145728, 4194304, 6291456, 8388608, 12582912, 16777216,
+         33554432, 67108864};
+    return values;
+}
+
 constexpr std::size_t kDefaultBatchSize = 65536;
 constexpr unsigned int kDefaultThreadsPerBlock = 256;
 
@@ -545,6 +561,16 @@ std::vector<DeviceInfo> devices()
     return out;
 }
 
+std::vector<unsigned int> benchmark_thread_candidates()
+{
+    return thread_candidates();
+}
+
+std::vector<std::size_t> benchmark_batch_candidates()
+{
+    return batch_candidates();
+}
+
 int selected_device()
 {
     return state().selected_device_index;
@@ -739,18 +765,11 @@ std::vector<std::size_t> crack_batch_matches(std::uint64_t batch_start,
     return match_indices;
 }
 
-BenchmarkResult benchmark()
+BenchmarkResult benchmark_with_progress(const std::function<bool(const BenchmarkProgress&)>& progress_callback)
 {
     if (!available()) {
         throw std::runtime_error("CUDA benchmark requested but CUDA is not available at runtime");
     }
-
-    const std::vector<unsigned int> thread_candidates = {128, 192, 256, 320, 384, 448, 512, 576,
-                                                         640, 704, 768, 832, 896, 960, 1024};
-    const std::vector<std::size_t> batch_candidates =
-        {8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608, 262144, 393216,
-         524288, 786432, 1048576, 1572864, 2097152, 3145728, 4194304, 6291456, 8388608, 12582912, 16777216,
-         33554432, 67108864};
 
     PlanData plan;
     PlanPattern pattern;
@@ -774,11 +793,28 @@ BenchmarkResult benchmark()
     BenchmarkResult best;
     const std::size_t original_batch = batch_size();
     const unsigned int original_threads = thread_count();
-    constexpr double kMinBenchmarkSeconds = 0.5;
+    constexpr double kMinBenchmarkSeconds = 0.25;
     constexpr int kMinIterations = 8;
+    const std::size_t total_candidates_to_test = thread_candidates().size() * batch_candidates().size();
+    std::size_t completed = 0;
 
-    for (unsigned int threads : thread_candidates) {
-        for (std::size_t batch : batch_candidates) {
+    for (unsigned int threads : thread_candidates()) {
+        for (std::size_t batch : batch_candidates()) {
+            if (progress_callback) {
+                BenchmarkProgress progress;
+                progress.completed = completed;
+                progress.total = total_candidates_to_test;
+                progress.current_batch_size = batch;
+                progress.current_thread_count = threads;
+                progress.best_batch_size = best.batch_size;
+                progress.best_thread_count = best.thread_count;
+                progress.best_candidates_per_second = best.candidates_per_second;
+                if (!progress_callback(progress)) {
+                    set_launch_config(original_batch, original_threads);
+                    return best;
+                }
+            }
+
             std::cout << "benchmark: trying --cuda-thread-count " << threads
                       << " --cuda-batch-size " << batch << " ... " << std::flush;
             try {
@@ -808,13 +844,28 @@ BenchmarkResult benchmark()
                 }
             } catch (const std::exception& ex) {
                 std::cout << "skipped (" << ex.what() << ')' << '\n';
-                continue;
             }
+            ++completed;
         }
+    }
+
+    if (progress_callback) {
+        BenchmarkProgress progress;
+        progress.completed = completed;
+        progress.total = total_candidates_to_test;
+        progress.best_batch_size = best.batch_size;
+        progress.best_thread_count = best.thread_count;
+        progress.best_candidates_per_second = best.candidates_per_second;
+        static_cast<void>(progress_callback(progress));
     }
 
     set_launch_config(original_batch, original_threads);
     return best;
+}
+
+BenchmarkResult benchmark()
+{
+    return benchmark_with_progress({});
 }
 
 }  // namespace cuda_backend
