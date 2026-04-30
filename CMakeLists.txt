@@ -42,6 +42,7 @@ if (CUDAToolkit_FOUND)
         set_target_properties(ibmbrute PROPERTIES
             CUDA_STANDARD 17
             CUDA_STANDARD_REQUIRED ON
+            CUDA_ARCHITECTURES "61;75;86;89;120"
         )
         set(IBMBRUTE_HAVE_CUDA_VALUE 1)
         set(IBMBRUTE_CUDA_STATUS "enabled (version ${CUDAToolkit_VERSION})")
