@@ -349,7 +349,8 @@ CrackOutcome crack_target_cuda(const TargetEntry& target,
                                std::size_t target_index,
                                std::size_t target_count,
                                std::uint64_t start_position,
-                               std::uint64_t total_work) {
+                               std::uint64_t total_work,
+                               const ProgressCallback& progress_callback) {
     CrackOutcome outcome;
     if (start_position >= total_work) {
         outcome.checkpoint = total_work;
@@ -384,6 +385,9 @@ CrackOutcome crack_target_cuda(const TargetEntry& target,
 
     save_state(false, target_index, start_position);
     std::uint64_t processed = start_position;
+    if (progress_callback) {
+        progress_callback(processed, total_work);
+    }
     while (processed < total_work) {
         if (g_stop) {
             outcome.interrupted = true;
@@ -395,6 +399,9 @@ CrackOutcome crack_target_cuda(const TargetEntry& target,
         const std::vector<std::size_t> match_indices =
             cuda_backend::crack_batch_matches(batch_start, static_cast<std::size_t>(batch_count), cfg.keep_going);
         processed += batch_count;
+        if (progress_callback) {
+            progress_callback(processed, total_work);
+        }
 
         if (!match_indices.empty()) {
             for (std::size_t match_index : match_indices) {
@@ -444,6 +451,9 @@ CrackOutcome crack_target_cuda(const TargetEntry& target,
         outcome.interrupted = true;
     }
     outcome.checkpoint = processed;
+    if (progress_callback) {
+        progress_callback(processed, total_work);
+    }
     outcome.passwords = found_passwords;
     outcome.found = !outcome.passwords.empty();
     if (outcome.found && !cfg.keep_going) {

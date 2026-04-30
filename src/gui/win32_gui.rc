@@ -1,0 +1,21 @@
+#include <windows.h>
+#include <commctrl.h>
+#include "gui_resources.h"
+
+IDD_MAIN_DIALOG DIALOGEX 0, 0, 246, 124
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_CAPTION | WS_MINIMIZEBOX | WS_SYSMENU
+CAPTION "ibmbrute GPU"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "GPU:", -1, 14, 14, 24, 8
+    COMBOBOX        IDC_GPU_COMBO, 40, 11, 122, 72, CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL
+    PUSHBUTTON      "Configure parameters...", IDC_CONFIGURE_BUTTON, 168, 10, 64, 14, WS_TABSTOP
+    LTEXT           "Username:", -1, 14, 40, 42, 8
+    EDITTEXT        IDC_USERNAME_EDIT, 60, 37, 172, 14, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Hash:", -1, 14, 62, 42, 8
+    EDITTEXT        IDC_HASH_EDIT, 60, 59, 172, 14, ES_AUTOHSCROLL | ES_UPPERCASE | WS_TABSTOP
+    CONTROL         "", IDC_PROGRESS_BAR, "msctls_progress32", WS_TABSTOP, 14, 94, 154, 14
+    DEFPUSHBUTTON   "Crack", IDC_CRACK_BUTTON, 176, 93, 56, 14, WS_TABSTOP
+END
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "ibmbrute-gui.manifest"

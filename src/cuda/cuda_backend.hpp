@@ -29,8 +29,19 @@ struct BenchmarkResult {
     double candidates_per_second = 0.0;
 };
 
+struct DeviceInfo {
+    int index = -1;
+    std::string name;
+    int major = 0;
+    int minor = 0;
+    std::size_t total_global_mem = 0;
+};
+
 bool compiled();
 bool available();
+std::vector<DeviceInfo> devices();
+int selected_device();
+void select_device(int index);
 std::string device_description();
 std::size_t batch_size();
 unsigned int thread_count();
@@ -80,8 +91,27 @@ struct BenchmarkResult {
     double candidates_per_second = 0.0;
 };
 
+struct DeviceInfo {
+    int index = -1;
+    std::string name;
+    int major = 0;
+    int minor = 0;
+    std::size_t total_global_mem = 0;
+};
+
 inline unsigned int thread_count() {
     return 0;
+}
+
+inline std::vector<DeviceInfo> devices() {
+    return {};
+}
+
+inline int selected_device() {
+    return -1;
+}
+
+inline void select_device(int) {
 }
 
 inline void set_launch_config(std::size_t, unsigned int) {

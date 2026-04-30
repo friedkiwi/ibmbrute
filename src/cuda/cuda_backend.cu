@@ -170,6 +170,7 @@ struct CudaState {
     std::size_t charset_byte_count = 0;
     std::size_t configured_batch_size = kDefaultBatchSize;
     unsigned int configured_thread_count = kDefaultThreadsPerBlock;
+    int selected_device_index = 0;
     bool scalar_buffers_ready = false;
     bool target_prepared = false;
 };
@@ -210,7 +211,7 @@ std::string format_rate(double value)
     return oss.str();
 }
 
-bool probe_device(cudaDeviceProp* prop, std::string* error)
+bool probe_device(int index, cudaDeviceProp* prop, std::string* error)
 {
     int device_count = 0;
     const cudaError_t count_status = cudaGetDeviceCount(&device_count);
@@ -226,9 +227,15 @@ bool probe_device(cudaDeviceProp* prop, std::string* error)
         }
         return false;
     }
+    if (index < 0 || index >= device_count) {
+        if (error != nullptr) {
+            *error = "selected CUDA device index is out of range";
+        }
+        return false;
+    }
 
     cudaDeviceProp local_prop{};
-    const cudaError_t prop_status = cudaGetDeviceProperties(&local_prop, 0);
+    const cudaError_t prop_status = cudaGetDeviceProperties(&local_prop, index);
     if (prop_status != cudaSuccess) {
         if (error != nullptr) {
             *error = cudaGetErrorString(prop_status);
@@ -240,6 +247,40 @@ bool probe_device(cudaDeviceProp* prop, std::string* error)
         *prop = local_prop;
     }
     return true;
+}
+
+void reset_state_buffers()
+{
+    CudaState& s = state();
+
+    auto free_buffer = [](auto& buffer) {
+        if (buffer.ptr != nullptr) {
+            cudaFree(buffer.ptr);
+            buffer.ptr = nullptr;
+        }
+    };
+
+    free_buffer(s.user_key);
+    free_buffer(s.target);
+    free_buffer(s.matches);
+    free_buffer(s.found_index);
+    free_buffer(s.round_keys);
+    free_buffer(s.patterns);
+    free_buffer(s.charset_offsets);
+    free_buffer(s.radices);
+    free_buffer(s.charset_bytes);
+
+    s.match_capacity = 0;
+    s.pattern_capacity = 0;
+    s.charset_offset_capacity = 0;
+    s.radix_capacity = 0;
+    s.charset_byte_capacity = 0;
+    s.pattern_count = 0;
+    s.charset_offset_count = 0;
+    s.radix_count = 0;
+    s.charset_byte_count = 0;
+    s.scalar_buffers_ready = false;
+    s.target_prepared = false;
 }
 
 template <typename T>
@@ -475,14 +516,66 @@ bool compiled()
 
 bool available()
 {
-    return probe_device(nullptr, nullptr);
+    return probe_device(state().selected_device_index, nullptr, nullptr);
+}
+
+std::vector<DeviceInfo> devices()
+{
+    std::vector<DeviceInfo> out;
+    int device_count = 0;
+    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count <= 0) {
+        return out;
+    }
+
+    out.reserve(static_cast<std::size_t>(device_count));
+    for (int index = 0; index < device_count; ++index) {
+        cudaDeviceProp prop{};
+        if (cudaGetDeviceProperties(&prop, index) != cudaSuccess) {
+            continue;
+        }
+
+        DeviceInfo info;
+        info.index = index;
+        info.name = prop.name;
+        info.major = prop.major;
+        info.minor = prop.minor;
+        info.total_global_mem = static_cast<std::size_t>(prop.totalGlobalMem);
+        out.push_back(std::move(info));
+    }
+    return out;
+}
+
+int selected_device()
+{
+    return state().selected_device_index;
+}
+
+void select_device(int index)
+{
+    CudaState& s = state();
+    if (index == s.selected_device_index) {
+        return;
+    }
+
+    if (s.scalar_buffers_ready || s.target_prepared || s.matches.ptr != nullptr || s.patterns.ptr != nullptr) {
+        check_cuda(cudaSetDevice(s.selected_device_index), "failed to reselect previous CUDA device");
+        reset_state_buffers();
+    }
+
+    cudaDeviceProp prop{};
+    std::string error;
+    if (!probe_device(index, &prop, &error)) {
+        throw std::runtime_error(std::string("failed to select CUDA device: ") + error);
+    }
+    check_cuda(cudaSetDevice(index), "failed to select CUDA device");
+    s.selected_device_index = index;
 }
 
 std::string device_description()
 {
     cudaDeviceProp prop{};
     std::string error;
-    if (!probe_device(&prop, &error)) {
+    if (!probe_device(state().selected_device_index, &prop, &error)) {
         return std::string("CUDA support compiled in, but runtime initialization failed: ") + error;
     }
 
@@ -527,7 +620,7 @@ void set_launch_config(std::size_t batch, unsigned int threads)
 
 void prepare_target(const PlanData& plan, const dst::Block8& user_key, const dst::Block8& target)
 {
-    check_cuda(cudaSetDevice(0), "failed to select CUDA device");
+    check_cuda(cudaSetDevice(state().selected_device_index), "failed to select CUDA device");
     ensure_buffers(0, 0);
     ensure_plan_buffers(plan);
 
@@ -580,7 +673,7 @@ std::vector<std::size_t> crack_batch_matches(std::uint64_t batch_start,
         throw std::runtime_error("CUDA batch is too large");
     }
 
-    check_cuda(cudaSetDevice(0), "failed to select CUDA device");
+    check_cuda(cudaSetDevice(state().selected_device_index), "failed to select CUDA device");
 
     CudaState& s = state();
     if (!s.target_prepared) {

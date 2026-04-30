@@ -5,6 +5,7 @@
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -94,6 +95,8 @@ struct CrackOutcome {
     std::uint64_t checkpoint = 0;
 };
 
+using ProgressCallback = std::function<void(std::uint64_t processed, std::uint64_t total_work)>;
+
 void print_usage();
 Config parse_args(int argc, char** argv, std::vector<std::string>& positional);
 bool verify_note_vectors();
@@ -151,7 +154,8 @@ CrackOutcome crack_target_cuda(const TargetEntry& target,
                                std::size_t target_index,
                                std::size_t target_count,
                                std::uint64_t start_position,
-                               std::uint64_t total_work);
+                               std::uint64_t total_work,
+                               const ProgressCallback& progress_callback = ProgressCallback());
 
 int run_cli(int argc, char** argv);
 
