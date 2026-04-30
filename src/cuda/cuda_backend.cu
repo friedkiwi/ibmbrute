@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <iostream>
 #include <limits>
@@ -224,28 +225,37 @@ std::string cuda_error_text(cudaError_t status)
     return oss.str();
 }
 
+std::string cuda_version_text(int version)
+{
+    if (version <= 0) {
+        return "not loaded";
+    }
+    std::ostringstream oss;
+    oss << (version / 1000) << '.' << ((version % 1000) / 10)
+        << " (" << version << ")";
+    return oss.str();
+}
+
 std::string runtime_versions()
 {
     int driver_version = 0;
-    int runtime_version = 0;
     const cudaError_t driver_status = cudaDriverGetVersion(&driver_version);
-    const cudaError_t runtime_status = cudaRuntimeGetVersion(&runtime_version);
 
     std::ostringstream oss;
     oss << "driver version ";
     if (driver_status == cudaSuccess && driver_version != 0) {
-        oss << driver_version;
+        oss << cuda_version_text(driver_version);
     } else if (driver_status == cudaSuccess) {
         oss << "not loaded";
     } else {
         oss << cuda_error_text(driver_status);
     }
 
-    oss << ", runtime version ";
-    if (runtime_status == cudaSuccess) {
-        oss << runtime_version;
-    } else {
-        oss << cuda_error_text(runtime_status);
+    oss << ", compile-time CUDA runtime " << cuda_version_text(CUDART_VERSION);
+
+    const char* visible_devices = std::getenv("CUDA_VISIBLE_DEVICES");
+    if (visible_devices != nullptr) {
+        oss << ", CUDA_VISIBLE_DEVICES=" << visible_devices;
     }
     return oss.str();
 }
