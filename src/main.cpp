@@ -794,6 +794,11 @@ int run_cuda_benchmark(const Config& cfg) {
 
     apply_cuda_launch_config(cfg);
     const cuda_backend::BenchmarkResult result = cuda_backend::benchmark();
+    if (result.batch_size == 0 || result.thread_count == 0) {
+        std::cout << "cuda benchmark:\n"
+                  << "  no viable launch configurations were found on this GPU\n";
+        return 1;
+    }
 
     std::cout << "cuda benchmark:\n"
               << "  batch size: " << result.batch_size << '\n'

@@ -659,21 +659,26 @@ BenchmarkResult benchmark()
 
     for (unsigned int threads : thread_candidates) {
         for (std::size_t batch : batch_candidates) {
-            set_launch_config(batch, threads);
-            crack_batch_matches(0, batch, false);
+            try {
+                set_launch_config(batch, threads);
+                crack_batch_matches(0, batch, false);
 
-            constexpr int kIterations = 6;
-            const auto started = std::chrono::steady_clock::now();
-            for (int i = 0; i < kIterations; ++i) {
-                crack_batch_matches(static_cast<std::uint64_t>(i) * batch, batch, false);
-            }
-            const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-            const double cps = (static_cast<double>(batch) * kIterations) / (elapsed > 1e-6 ? elapsed : 1e-6);
+                constexpr int kIterations = 6;
+                const auto started = std::chrono::steady_clock::now();
+                for (int i = 0; i < kIterations; ++i) {
+                    crack_batch_matches(static_cast<std::uint64_t>(i) * batch, batch, false);
+                }
+                const double elapsed =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+                const double cps = (static_cast<double>(batch) * kIterations) / (elapsed > 1e-6 ? elapsed : 1e-6);
 
-            if (cps > best.candidates_per_second) {
-                best.batch_size = batch;
-                best.thread_count = threads;
-                best.candidates_per_second = cps;
+                if (cps > best.candidates_per_second) {
+                    best.batch_size = batch;
+                    best.thread_count = threads;
+                    best.candidates_per_second = cps;
+                }
+            } catch (const std::exception&) {
+                continue;
             }
         }
     }
