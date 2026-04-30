@@ -656,7 +656,8 @@ BenchmarkResult benchmark()
                                                          640, 704, 768, 832, 896, 960, 1024};
     const std::vector<std::size_t> batch_candidates =
         {8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608, 262144, 393216,
-         524288, 786432, 1048576, 1572864, 2097152, 3145728, 4194304, 6291456, 8388608, 12582912, 16777216};
+         524288, 786432, 1048576, 1572864, 2097152, 3145728, 4194304, 6291456, 8388608, 12582912, 16777216,
+         33554432, 67108864};
 
     PlanData plan;
     PlanPattern pattern;
@@ -680,7 +681,7 @@ BenchmarkResult benchmark()
     BenchmarkResult best;
     const std::size_t original_batch = batch_size();
     const unsigned int original_threads = thread_count();
-    constexpr double kMinBenchmarkSeconds = 0.25;
+    constexpr double kMinBenchmarkSeconds = 0.5;
     constexpr int kMinIterations = 8;
 
     for (unsigned int threads : thread_candidates) {
