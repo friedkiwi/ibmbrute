@@ -33,14 +33,44 @@ if (CUDAToolkit_FOUND)
     check_language(CUDA)
     if (CMAKE_CUDA_COMPILER)
         enable_language(CUDA)
-        target_sources(ibmbrute PRIVATE src/cuda/cuda_backend.cu)
-        target_link_libraries(ibmbrute PRIVATE CUDA::cudart)
-        set_target_properties(ibmbrute PROPERTIES
-            CUDA_STANDARD 17
-            CUDA_STANDARD_REQUIRED ON
+        file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/cmake")
+        file(WRITE "${CMAKE_BINARY_DIR}/cmake/cuda_cxx17_probe.cu" [[
+#include <cuda_runtime.h>
+#include <functional>
+
+__global__ void probe_kernel() {}
+
+int probe()
+{
+    std::function<int()> fn = [] { return 0; };
+    return fn();
+}
+]])
+        set(IBMBRUTE_PREVIOUS_TRY_COMPILE_TARGET_TYPE "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+        set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+        try_compile(IBMBRUTE_CUDA_CXX17_WORKS
+            "${CMAKE_BINARY_DIR}/cmake/cuda_cxx17_probe"
+            "${CMAKE_BINARY_DIR}/cmake/cuda_cxx17_probe.cu"
+            CMAKE_FLAGS
+                "-DCMAKE_CUDA_STANDARD=17"
+                "-DCMAKE_CUDA_STANDARD_REQUIRED=ON"
+            OUTPUT_VARIABLE IBMBRUTE_CUDA_CXX17_OUTPUT
         )
-        set(IBMBRUTE_HAVE_CUDA_VALUE 1)
-        set(IBMBRUTE_CUDA_STATUS "enabled (version ${CUDAToolkit_VERSION})")
+        set(CMAKE_TRY_COMPILE_TARGET_TYPE "${IBMBRUTE_PREVIOUS_TRY_COMPILE_TARGET_TYPE}")
+
+        if (IBMBRUTE_CUDA_CXX17_WORKS)
+            target_sources(ibmbrute PRIVATE src/cuda/cuda_backend.cu)
+            target_link_libraries(ibmbrute PRIVATE CUDA::cudart)
+            set_target_properties(ibmbrute PROPERTIES
+                CUDA_STANDARD 17
+                CUDA_STANDARD_REQUIRED ON
+            )
+            set(IBMBRUTE_HAVE_CUDA_VALUE 1)
+            set(IBMBRUTE_CUDA_STATUS "enabled (version ${CUDAToolkit_VERSION})")
+        else()
+            set(IBMBRUTE_CUDA_STATUS
+                "disabled: CUDA compiler cannot compile C++17 host headers with the active host compiler")
+        endif()
     else()
         set(IBMBRUTE_CUDA_STATUS "toolkit found, but no CUDA compiler is available")
     endif()
