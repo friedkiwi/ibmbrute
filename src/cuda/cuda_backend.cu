@@ -2,7 +2,9 @@
 
 #include <cuda_runtime.h>
 
+#include <chrono>
 #include <cstdint>
+#include <iostream>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -13,8 +15,24 @@ namespace cuda_backend {
 
 namespace {
 
-constexpr std::size_t kBatchSize = 65536;
-constexpr unsigned int kThreadsPerBlock = 256;
+const std::vector<unsigned int>& thread_candidates()
+{
+    static const std::vector<unsigned int> values = {128, 192, 256, 320, 384, 448, 512, 576,
+                                                     640, 704, 768, 832, 896, 960, 1024};
+    return values;
+}
+
+const std::vector<std::size_t>& batch_candidates()
+{
+    static const std::vector<std::size_t> values =
+        {8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608, 262144, 393216,
+         524288, 786432, 1048576, 1572864, 2097152, 3145728, 4194304, 6291456, 8388608, 12582912, 16777216,
+         33554432, 67108864};
+    return values;
+}
+
+constexpr std::size_t kDefaultBatchSize = 65536;
+constexpr unsigned int kDefaultThreadsPerBlock = 256;
 
 __constant__ unsigned char kIP[64] = {
     58, 50, 42, 34, 26, 18, 10, 2,
@@ -166,6 +184,9 @@ struct CudaState {
     std::size_t charset_offset_count = 0;
     std::size_t radix_count = 0;
     std::size_t charset_byte_count = 0;
+    std::size_t configured_batch_size = kDefaultBatchSize;
+    unsigned int configured_thread_count = kDefaultThreadsPerBlock;
+    int selected_device_index = 0;
     bool scalar_buffers_ready = false;
     bool target_prepared = false;
 };
@@ -185,7 +206,28 @@ void check_cuda(cudaError_t status, const char* action)
     }
 }
 
-bool probe_device(cudaDeviceProp* prop, std::string* error)
+std::string format_rate(double value)
+{
+    const char* suffix = "";
+    if (value >= 1e9) {
+        value /= 1e9;
+        suffix = "g";
+    } else if (value >= 1e6) {
+        value /= 1e6;
+        suffix = "m";
+    } else if (value >= 1e3) {
+        value /= 1e3;
+        suffix = "k";
+    }
+
+    std::ostringstream oss;
+    oss.setf(std::ios::fixed, std::ios::floatfield);
+    oss.precision(3);
+    oss << value << suffix;
+    return oss.str();
+}
+
+bool probe_device(int index, cudaDeviceProp* prop, std::string* error)
 {
     int device_count = 0;
     const cudaError_t count_status = cudaGetDeviceCount(&device_count);
@@ -201,9 +243,15 @@ bool probe_device(cudaDeviceProp* prop, std::string* error)
         }
         return false;
     }
+    if (index < 0 || index >= device_count) {
+        if (error != nullptr) {
+            *error = "selected CUDA device index is out of range";
+        }
+        return false;
+    }
 
     cudaDeviceProp local_prop{};
-    const cudaError_t prop_status = cudaGetDeviceProperties(&local_prop, 0);
+    const cudaError_t prop_status = cudaGetDeviceProperties(&local_prop, index);
     if (prop_status != cudaSuccess) {
         if (error != nullptr) {
             *error = cudaGetErrorString(prop_status);
@@ -215,6 +263,40 @@ bool probe_device(cudaDeviceProp* prop, std::string* error)
         *prop = local_prop;
     }
     return true;
+}
+
+void reset_state_buffers()
+{
+    CudaState& s = state();
+
+    auto free_buffer = [](auto& buffer) {
+        if (buffer.ptr != nullptr) {
+            cudaFree(buffer.ptr);
+            buffer.ptr = nullptr;
+        }
+    };
+
+    free_buffer(s.user_key);
+    free_buffer(s.target);
+    free_buffer(s.matches);
+    free_buffer(s.found_index);
+    free_buffer(s.round_keys);
+    free_buffer(s.patterns);
+    free_buffer(s.charset_offsets);
+    free_buffer(s.radices);
+    free_buffer(s.charset_bytes);
+
+    s.match_capacity = 0;
+    s.pattern_capacity = 0;
+    s.charset_offset_capacity = 0;
+    s.radix_capacity = 0;
+    s.charset_byte_capacity = 0;
+    s.pattern_count = 0;
+    s.charset_offset_count = 0;
+    s.radix_count = 0;
+    s.charset_byte_count = 0;
+    s.scalar_buffers_ready = false;
+    s.target_prepared = false;
 }
 
 template <typename T>
@@ -450,14 +532,76 @@ bool compiled()
 
 bool available()
 {
-    return probe_device(nullptr, nullptr);
+    return probe_device(state().selected_device_index, nullptr, nullptr);
+}
+
+std::vector<DeviceInfo> devices()
+{
+    std::vector<DeviceInfo> out;
+    int device_count = 0;
+    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count <= 0) {
+        return out;
+    }
+
+    out.reserve(static_cast<std::size_t>(device_count));
+    for (int index = 0; index < device_count; ++index) {
+        cudaDeviceProp prop{};
+        if (cudaGetDeviceProperties(&prop, index) != cudaSuccess) {
+            continue;
+        }
+
+        DeviceInfo info;
+        info.index = index;
+        info.name = prop.name;
+        info.major = prop.major;
+        info.minor = prop.minor;
+        info.total_global_mem = static_cast<std::size_t>(prop.totalGlobalMem);
+        out.push_back(std::move(info));
+    }
+    return out;
+}
+
+std::vector<unsigned int> benchmark_thread_candidates()
+{
+    return thread_candidates();
+}
+
+std::vector<std::size_t> benchmark_batch_candidates()
+{
+    return batch_candidates();
+}
+
+int selected_device()
+{
+    return state().selected_device_index;
+}
+
+void select_device(int index)
+{
+    CudaState& s = state();
+    if (index == s.selected_device_index) {
+        return;
+    }
+
+    if (s.scalar_buffers_ready || s.target_prepared || s.matches.ptr != nullptr || s.patterns.ptr != nullptr) {
+        check_cuda(cudaSetDevice(s.selected_device_index), "failed to reselect previous CUDA device");
+        reset_state_buffers();
+    }
+
+    cudaDeviceProp prop{};
+    std::string error;
+    if (!probe_device(index, &prop, &error)) {
+        throw std::runtime_error(std::string("failed to select CUDA device: ") + error);
+    }
+    check_cuda(cudaSetDevice(index), "failed to select CUDA device");
+    s.selected_device_index = index;
 }
 
 std::string device_description()
 {
     cudaDeviceProp prop{};
     std::string error;
-    if (!probe_device(&prop, &error)) {
+    if (!probe_device(state().selected_device_index, &prop, &error)) {
         return std::string("CUDA support compiled in, but runtime initialization failed: ") + error;
     }
 
@@ -465,18 +609,44 @@ std::string device_description()
     oss << "CUDA device: " << prop.name
         << ", compute capability " << prop.major << '.' << prop.minor
         << ", global memory " << (prop.totalGlobalMem / (1024ull * 1024ull)) << " MiB"
-        << ", batch size: " << kBatchSize;
+        << ", batch size: " << state().configured_batch_size
+        << ", threads per block: " << state().configured_thread_count;
     return oss.str();
 }
 
 std::size_t batch_size()
 {
-    return kBatchSize;
+    return state().configured_batch_size;
+}
+
+unsigned int thread_count()
+{
+    return state().configured_thread_count;
+}
+
+void set_launch_config(std::size_t batch, unsigned int threads)
+{
+    if (batch == 0) {
+        throw std::runtime_error("CUDA batch size must be greater than zero");
+    }
+    if (threads == 0) {
+        throw std::runtime_error("CUDA thread count must be greater than zero");
+    }
+    if (threads > 1024) {
+        throw std::runtime_error("CUDA thread count must be at most 1024");
+    }
+    if ((threads % 32u) != 0u) {
+        throw std::runtime_error("CUDA thread count must be a multiple of 32");
+    }
+
+    CudaState& s = state();
+    s.configured_batch_size = batch;
+    s.configured_thread_count = threads;
 }
 
 void prepare_target(const PlanData& plan, const dst::Block8& user_key, const dst::Block8& target)
 {
-    check_cuda(cudaSetDevice(0), "failed to select CUDA device");
+    check_cuda(cudaSetDevice(state().selected_device_index), "failed to select CUDA device");
     ensure_buffers(0, 0);
     ensure_plan_buffers(plan);
 
@@ -529,7 +699,7 @@ std::vector<std::size_t> crack_batch_matches(std::uint64_t batch_start,
         throw std::runtime_error("CUDA batch is too large");
     }
 
-    check_cuda(cudaSetDevice(0), "failed to select CUDA device");
+    check_cuda(cudaSetDevice(state().selected_device_index), "failed to select CUDA device");
 
     CudaState& s = state();
     if (!s.target_prepared) {
@@ -550,19 +720,20 @@ std::vector<std::size_t> crack_batch_matches(std::uint64_t batch_start,
     }
 
     const unsigned int count = static_cast<unsigned int>(candidate_count);
-    const unsigned int block_count = (count + kThreadsPerBlock - 1) / kThreadsPerBlock;
-    dst_kernel<<<block_count, kThreadsPerBlock>>>(s.patterns.ptr,
-                                                  static_cast<unsigned int>(s.pattern_count),
-                                                  s.charset_offsets.ptr,
-                                                  s.radices.ptr,
-                                                  s.charset_bytes.ptr,
-                                                  s.round_keys.ptr,
-                                                  s.target.ptr,
-                                                  s.matches.ptr,
-                                                  s.found_index.ptr,
-                                                  batch_start,
-                                                  keep_going ? 1u : 0u,
-                                                  count);
+    const unsigned int threads_per_block = s.configured_thread_count;
+    const unsigned int block_count = (count + threads_per_block - 1) / threads_per_block;
+    dst_kernel<<<block_count, threads_per_block>>>(s.patterns.ptr,
+                                                   static_cast<unsigned int>(s.pattern_count),
+                                                   s.charset_offsets.ptr,
+                                                   s.radices.ptr,
+                                                   s.charset_bytes.ptr,
+                                                   s.round_keys.ptr,
+                                                   s.target.ptr,
+                                                   s.matches.ptr,
+                                                   s.found_index.ptr,
+                                                   batch_start,
+                                                   keep_going ? 1u : 0u,
+                                                   count);
     check_cuda(cudaGetLastError(), "failed to launch CUDA kernel");
     check_cuda(cudaDeviceSynchronize(), "failed to execute CUDA kernel");
 
@@ -592,6 +763,109 @@ std::vector<std::size_t> crack_batch_matches(std::uint64_t batch_start,
         }
     }
     return match_indices;
+}
+
+BenchmarkResult benchmark_with_progress(const std::function<bool(const BenchmarkProgress&)>& progress_callback)
+{
+    if (!available()) {
+        throw std::runtime_error("CUDA benchmark requested but CUDA is not available at runtime");
+    }
+
+    PlanData plan;
+    PlanPattern pattern;
+    pattern.start = 0;
+    pattern.length = 8;
+    pattern.offset_index = 0;
+    plan.patterns.push_back(pattern);
+    static constexpr const char* full_charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#@$_";
+    for (unsigned int i = 0; i < 8; ++i) {
+        plan.charset_offsets.push_back(static_cast<unsigned int>(plan.charset_bytes.size()));
+        plan.radices.push_back(40);
+        for (const char* p = full_charset; *p != '\0'; ++p) {
+            plan.charset_bytes.push_back(dst::ebcdic8(std::string(1, *p))[0]);
+        }
+    }
+
+    const dst::Block8 user_key = dst::ebcdic8("QSECOFR");
+    const dst::Block8 target{};
+    prepare_target(plan, user_key, target);
+
+    BenchmarkResult best;
+    const std::size_t original_batch = batch_size();
+    const unsigned int original_threads = thread_count();
+    constexpr double kMinBenchmarkSeconds = 0.25;
+    constexpr int kMinIterations = 8;
+    const std::size_t total_candidates_to_test = thread_candidates().size() * batch_candidates().size();
+    std::size_t completed = 0;
+
+    for (unsigned int threads : thread_candidates()) {
+        for (std::size_t batch : batch_candidates()) {
+            if (progress_callback) {
+                BenchmarkProgress progress;
+                progress.completed = completed;
+                progress.total = total_candidates_to_test;
+                progress.current_batch_size = batch;
+                progress.current_thread_count = threads;
+                progress.best_batch_size = best.batch_size;
+                progress.best_thread_count = best.thread_count;
+                progress.best_candidates_per_second = best.candidates_per_second;
+                if (!progress_callback(progress)) {
+                    set_launch_config(original_batch, original_threads);
+                    return best;
+                }
+            }
+
+            std::cout << "benchmark: trying --cuda-thread-count " << threads
+                      << " --cuda-batch-size " << batch << " ... " << std::flush;
+            try {
+                set_launch_config(batch, threads);
+                crack_batch_matches(0, batch, false);
+
+                const auto started = std::chrono::steady_clock::now();
+                int iterations = 0;
+                do {
+                    crack_batch_matches(static_cast<std::uint64_t>(iterations) * batch, batch, false);
+                    ++iterations;
+                } while (iterations < kMinIterations ||
+                         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() <
+                             kMinBenchmarkSeconds);
+
+                const double elapsed =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+                const double cps = (static_cast<double>(batch) * iterations) / (elapsed > 1e-6 ? elapsed : 1e-6);
+
+                std::cout << format_rate(cps) << " c/s over " << iterations
+                          << " iterations in " << elapsed << "s" << '\n';
+
+                if (cps > best.candidates_per_second) {
+                    best.batch_size = batch;
+                    best.thread_count = threads;
+                    best.candidates_per_second = cps;
+                }
+            } catch (const std::exception& ex) {
+                std::cout << "skipped (" << ex.what() << ')' << '\n';
+            }
+            ++completed;
+        }
+    }
+
+    if (progress_callback) {
+        BenchmarkProgress progress;
+        progress.completed = completed;
+        progress.total = total_candidates_to_test;
+        progress.best_batch_size = best.batch_size;
+        progress.best_thread_count = best.thread_count;
+        progress.best_candidates_per_second = best.candidates_per_second;
+        static_cast<void>(progress_callback(progress));
+    }
+
+    set_launch_config(original_batch, original_threads);
+    return best;
+}
+
+BenchmarkResult benchmark()
+{
+    return benchmark_with_progress({});
 }
 
 }  // namespace cuda_backend

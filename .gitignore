@@ -1,6 +1,7 @@
 /build/
 /build-optimised/
 /cmake-build-*/
+/out/
 *.session
 *.o
 *.obj
@@ -13,3 +14,14 @@
 *.out
 .DS_Store
 compile_commands.json
+
+# Local editor and Codex state
+.vs/
+.codex
+
+# Visual Studio local CMake settings
+CMakeSettings.json
+
+# Resource editor scratch files
+src/gui/*.aps
+src/gui/RC*

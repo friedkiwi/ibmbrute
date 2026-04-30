@@ -2,29 +2,23 @@ cmake_minimum_required(VERSION 3.17)
 
 project(ibmi_bruteforce LANGUAGES CXX)
 
-add_executable(ibmbrute
-    src/main.cpp
+set(IBMBRUTE_COMMON_SOURCES
     src/dst_hash.cpp
+    src/app/app_util.cpp
+    src/app/session.cpp
+    src/app/cracker.cpp
+    src/app/run.cpp
 )
 
-target_compile_features(ibmbrute PRIVATE cxx_std_17)
-
-if (MSVC)
-    target_compile_options(ibmbrute PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:/W4>
-        $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:/permissive->
-    )
-else()
-    target_compile_options(ibmbrute PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Wall>
-        $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Wextra>
-        $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Wpedantic>
-    )
-endif()
+add_executable(ibmbrute
+    src/main.cpp
+    ${IBMBRUTE_COMMON_SOURCES}
+)
 
 set(IBMBRUTE_HAVE_METAL_VALUE 0)
 set(IBMBRUTE_HAVE_CUDA_VALUE 0)
 set(IBMBRUTE_CUDA_STATUS "disabled")
+set(IBMBRUTE_CUDA_SOURCES)
 
 include(CheckLanguage)
 
@@ -95,8 +89,55 @@ if (APPLE)
     endif()
 endif()
 
-target_compile_definitions(ibmbrute PRIVATE IBMBRUTE_HAVE_METAL=${IBMBRUTE_HAVE_METAL_VALUE})
-target_compile_definitions(ibmbrute PRIVATE IBMBRUTE_HAVE_CUDA=${IBMBRUTE_HAVE_CUDA_VALUE})
+function(ibmbrute_configure_target target_name)
+    target_compile_features(${target_name} PRIVATE cxx_std_17)
+
+    if (MSVC)
+        target_compile_options(${target_name} PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:/W4>
+            $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:/permissive->
+        )
+    else()
+        target_compile_options(${target_name} PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Wall>
+            $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Wextra>
+            $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Wpedantic>
+        )
+    endif()
+
+    target_compile_definitions(${target_name} PRIVATE
+        IBMBRUTE_HAVE_METAL=${IBMBRUTE_HAVE_METAL_VALUE}
+        IBMBRUTE_HAVE_CUDA=${IBMBRUTE_HAVE_CUDA_VALUE}
+    )
+
+    if (IBMBRUTE_CUDA_SOURCES)
+        target_sources(${target_name} PRIVATE ${IBMBRUTE_CUDA_SOURCES})
+        target_link_libraries(${target_name} PRIVATE CUDA::cudart)
+        set_target_properties(${target_name} PROPERTIES
+            CUDA_STANDARD 17
+            CUDA_STANDARD_REQUIRED ON
+            CUDA_ARCHITECTURES "75;86;89;120"
+        )
+    endif()
+endfunction()
+
+ibmbrute_configure_target(ibmbrute)
+
+if (WIN32 AND IBMBRUTE_HAVE_CUDA_VALUE)
+    add_executable(ibmbrute-win32 WIN32
+        ${IBMBRUTE_COMMON_SOURCES}
+        src/gui/win32_benchmark_dialog.cpp
+        src/gui/win32_config_dialog.cpp
+        src/gui/win32_gui.cpp
+        src/gui/win32_gui.rc
+    )
+    target_compile_definitions(ibmbrute-win32 PRIVATE UNICODE _UNICODE)
+    target_link_libraries(ibmbrute-win32 PRIVATE comctl32)
+    if (MSVC)
+        target_link_options(ibmbrute-win32 PRIVATE /MANIFEST:NO)
+    endif()
+    ibmbrute_configure_target(ibmbrute-win32)
+endif()
 
 message(STATUS "CUDA toolkit support: ${IBMBRUTE_CUDA_STATUS}")
 
