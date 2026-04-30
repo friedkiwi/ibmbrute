@@ -630,8 +630,9 @@ BenchmarkResult benchmark()
         throw std::runtime_error("CUDA benchmark requested but CUDA is not available at runtime");
     }
 
-    const std::vector<unsigned int> thread_candidates = {128, 256, 512, 768, 1024};
-    const std::vector<std::size_t> batch_candidates = {8192, 16384, 32768, 65536, 131072, 262144, 1048576, 4194304};
+    const std::vector<unsigned int> thread_candidates = {128, 256, 384, 512, 640, 768, 896, 1024};
+    const std::vector<std::size_t> batch_candidates =
+        {8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304};
 
     PlanData plan;
     PlanPattern pattern;
