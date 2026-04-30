@@ -90,7 +90,6 @@ function(ibmbrute_configure_target target_name)
             CUDA_STANDARD 11
             CUDA_STANDARD_REQUIRED ON
             CUDA_EXTENSIONS OFF
-            CUDA_ARCHITECTURES "75;86;89;120"
         )
     endif()
 endfunction()
