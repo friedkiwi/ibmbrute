@@ -27,6 +27,7 @@ namespace {
 constexpr UINT_PTR kProgressTimerId = 1;
 constexpr UINT WM_APP_CRACK_FINISHED = WM_APP + 1;
 constexpr const wchar_t* kRegistryPath = L"Software\\ibmbrute\\win32";
+constexpr const wchar_t* kWindowTitle = L"ibmbrute-win32";
 
 struct WorkerResult {
     ibmbrute_app::CrackOutcome outcome;
@@ -411,13 +412,13 @@ void finish_worker(AppState& state, std::unique_ptr<WorkerResult> result)
 
     if (!result->error.empty()) {
         set_status_text(state, widen_ascii(result->error));
-        show_message(state.hwnd, MB_ICONERROR | MB_OK, widen_ascii(result->error), L"ibmbrute GPU");
+        show_message(state.hwnd, MB_ICONERROR | MB_OK, widen_ascii(result->error), kWindowTitle);
     } else if (result->outcome.interrupted) {
         set_status_text(state, L"Cracking stopped. Session state was saved.");
         show_message(state.hwnd,
                      MB_ICONINFORMATION | MB_OK,
                      L"Cracking stopped. Session state was saved.",
-                     L"ibmbrute GPU");
+                     kWindowTitle);
     } else if (result->outcome.found && !result->outcome.passwords.empty()) {
         const std::string& password = result->outcome.passwords.front();
         try {
@@ -430,7 +431,7 @@ void finish_worker(AppState& state, std::unique_ptr<WorkerResult> result)
         } catch (const std::exception& ex) {
             const std::wstring message = widen_ascii(ex.what());
             set_status_text(state, message);
-            show_message(state.hwnd, MB_ICONERROR | MB_OK, message, L"ibmbrute GPU");
+            show_message(state.hwnd, MB_ICONERROR | MB_OK, message, kWindowTitle);
             state.active_plan.clear();
             if (state.close_when_idle) {
                 EndDialog(state.hwnd, 0);
@@ -442,12 +443,12 @@ void finish_worker(AppState& state, std::unique_ptr<WorkerResult> result)
                                      format_elapsed_hms(result->elapsed_seconds) + L" -> " +
                                      widen_ascii(password);
         set_status_text(state, message);
-        show_message(state.hwnd, MB_ICONINFORMATION | MB_OK, message, L"ibmbrute GPU");
+        show_message(state.hwnd, MB_ICONINFORMATION | MB_OK, message, kWindowTitle);
     } else {
         std::wostringstream oss;
         oss << L"No match in " << widen_ascii(ibmbrute_app::format_number(result->total_work)) << L" candidates.";
         set_status_text(state, oss.str());
-        show_message(state.hwnd, MB_ICONINFORMATION | MB_OK, oss.str(), L"ibmbrute GPU");
+        show_message(state.hwnd, MB_ICONINFORMATION | MB_OK, oss.str(), kWindowTitle);
     }
 
     state.active_plan.clear();
@@ -462,7 +463,7 @@ void begin_crack(AppState& state)
     ibmbrute_app::Config cfg;
     std::wstring error_text;
     if (!validate_inputs(state, cfg, &error_text)) {
-        show_message(state.hwnd, MB_ICONERROR | MB_OK, error_text, L"ibmbrute GPU");
+        show_message(state.hwnd, MB_ICONERROR | MB_OK, error_text, kWindowTitle);
         update_crack_button_enabled(state);
         return;
     }
@@ -501,7 +502,7 @@ void begin_crack(AppState& state)
                                          L" and hash " + widen_ascii(target.target_hex) + L" in " +
                                          format_elapsed_hms(0.0) + L" -> " + widen_ascii(found_password);
             set_status_text(state, message);
-            show_message(state.hwnd, MB_ICONINFORMATION | MB_OK, message, L"ibmbrute GPU");
+            show_message(state.hwnd, MB_ICONINFORMATION | MB_OK, message, kWindowTitle);
             return;
         }
         if (ibmbrute_app::has_default_password(target)) {
@@ -518,7 +519,7 @@ void begin_crack(AppState& state)
                                          L" and hash " + widen_ascii(target.target_hex) + L" in " +
                                          format_elapsed_hms(0.0) + L" -> " + widen_ascii(target.user);
             set_status_text(state, message);
-            show_message(state.hwnd, MB_ICONINFORMATION | MB_OK, message, L"ibmbrute GPU");
+            show_message(state.hwnd, MB_ICONINFORMATION | MB_OK, message, kWindowTitle);
             return;
         }
 
@@ -528,7 +529,7 @@ void begin_crack(AppState& state)
             if (ibmbrute_app::session_should_resume(restored, cfg, fingerprint) && restored.target_index < 1) {
                 const int choice = MessageBoxW(state.hwnd,
                                                L"A saved session was found for this target.\n\nResume it?",
-                                               L"ibmbrute GPU",
+                                               kWindowTitle,
                                                MB_ICONQUESTION | MB_YESNO);
                 if (choice == IDYES) {
                     start_position = restored.position;
@@ -591,7 +592,7 @@ void begin_crack(AppState& state)
                          reinterpret_cast<LPARAM>(result.release()));
         });
     } catch (const std::exception& ex) {
-        show_message(state.hwnd, MB_ICONERROR | MB_OK, widen_ascii(ex.what()), L"ibmbrute GPU");
+        show_message(state.hwnd, MB_ICONERROR | MB_OK, widen_ascii(ex.what()), kWindowTitle);
         update_crack_button_enabled(state);
     }
 }
@@ -622,7 +623,7 @@ INT_PTR CALLBACK dialog_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_p
                 show_message(hwnd,
                              MB_ICONERROR | MB_OK,
                              L"No supported NVIDIA GPU was detected. The GUI requires CUDA.",
-                             L"ibmbrute GPU");
+                             kWindowTitle);
                 EndDialog(hwnd, 1);
                 return FALSE;
             }
@@ -653,7 +654,7 @@ INT_PTR CALLBACK dialog_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_p
                     if (state->running) {
                         if (MessageBoxW(hwnd,
                                         L"Stop the current cracking run?",
-                                        L"ibmbrute GPU",
+                                        kWindowTitle,
                                         MB_ICONQUESTION | MB_YESNO) == IDYES) {
                             ibmbrute_app::g_stop = 1;
                         }
@@ -700,7 +701,7 @@ INT_PTR CALLBACK dialog_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_p
             if (state->running) {
                 if (MessageBoxW(hwnd,
                                 L"Cracking is in progress. Stop and close?",
-                                L"ibmbrute GPU",
+                                kWindowTitle,
                                 MB_ICONQUESTION | MB_YESNO) == IDYES) {
                     state->close_when_idle = true;
                     ibmbrute_app::g_stop = 1;
