@@ -147,6 +147,22 @@ struct DeviceBuffer {
     }
 };
 
+struct CudaState {
+    DeviceBuffer<unsigned char> passwords;
+    DeviceBuffer<unsigned char> user_key;
+    DeviceBuffer<unsigned char> target;
+    DeviceBuffer<unsigned int> matches;
+    std::size_t password_capacity = 0;
+    std::size_t match_capacity = 0;
+    bool scalar_buffers_ready = false;
+};
+
+CudaState& state()
+{
+    static CudaState s;
+    return s;
+}
+
 void check_cuda(cudaError_t status, const char* action)
 {
     if (status != cudaSuccess) {
@@ -186,6 +202,33 @@ bool probe_device(cudaDeviceProp* prop, std::string* error)
         *prop = local_prop;
     }
     return true;
+}
+
+template <typename T>
+void ensure_capacity(DeviceBuffer<T>& buffer, std::size_t& capacity, std::size_t required, const char* action)
+{
+    if (capacity >= required && buffer.ptr != nullptr) {
+        return;
+    }
+    if (buffer.ptr != nullptr) {
+        check_cuda(cudaFree(buffer.ptr), "failed to release CUDA buffer");
+        buffer.ptr = nullptr;
+        capacity = 0;
+    }
+    check_cuda(cudaMalloc(&buffer.ptr, required), action);
+    capacity = required;
+}
+
+void ensure_buffers(std::size_t password_bytes, std::size_t match_bytes)
+{
+    CudaState& s = state();
+    ensure_capacity(s.passwords, s.password_capacity, password_bytes, "failed to allocate CUDA password buffer");
+    ensure_capacity(s.matches, s.match_capacity, match_bytes, "failed to allocate CUDA match buffer");
+    if (!s.scalar_buffers_ready) {
+        check_cuda(cudaMalloc(&s.user_key.ptr, sizeof(dst::Block8)), "failed to allocate CUDA user buffer");
+        check_cuda(cudaMalloc(&s.target.ptr, sizeof(dst::Block8)), "failed to allocate CUDA target buffer");
+        s.scalar_buffers_ready = true;
+    }
 }
 
 __device__ __forceinline__ unsigned long long permute(unsigned long long input,
@@ -336,27 +379,20 @@ std::vector<std::size_t> crack_batch_matches(const std::vector<dst::Block8>& enc
     const std::size_t key_bytes = candidate_count * sizeof(dst::Block8);
     const std::size_t match_bytes = candidate_count * sizeof(unsigned int);
 
-    DeviceBuffer<unsigned char> device_passwords;
-    DeviceBuffer<unsigned char> device_user_key;
-    DeviceBuffer<unsigned char> device_target;
-    DeviceBuffer<unsigned int> device_matches;
+    CudaState& s = state();
+    ensure_buffers(key_bytes, match_bytes);
 
-    check_cuda(cudaMalloc(&device_passwords.ptr, key_bytes), "failed to allocate CUDA password buffer");
-    check_cuda(cudaMalloc(&device_user_key.ptr, user_key.size()), "failed to allocate CUDA user buffer");
-    check_cuda(cudaMalloc(&device_target.ptr, target.size()), "failed to allocate CUDA target buffer");
-    check_cuda(cudaMalloc(&device_matches.ptr, match_bytes), "failed to allocate CUDA match buffer");
-
-    check_cuda(cudaMemcpy(device_passwords.ptr,
+    check_cuda(cudaMemcpy(s.passwords.ptr,
                           encoded_passwords.data(),
                           key_bytes,
                           cudaMemcpyHostToDevice),
                "failed to upload CUDA password buffer");
-    check_cuda(cudaMemcpy(device_user_key.ptr,
+    check_cuda(cudaMemcpy(s.user_key.ptr,
                           user_key.data(),
                           user_key.size(),
                           cudaMemcpyHostToDevice),
                "failed to upload CUDA user buffer");
-    check_cuda(cudaMemcpy(device_target.ptr,
+    check_cuda(cudaMemcpy(s.target.ptr,
                           target.data(),
                           target.size(),
                           cudaMemcpyHostToDevice),
@@ -364,17 +400,17 @@ std::vector<std::size_t> crack_batch_matches(const std::vector<dst::Block8>& enc
 
     const unsigned int count = static_cast<unsigned int>(candidate_count);
     const unsigned int block_count = (count + kThreadsPerBlock - 1) / kThreadsPerBlock;
-    dst_kernel<<<block_count, kThreadsPerBlock>>>(device_passwords.ptr,
-                                                  device_user_key.ptr,
-                                                  device_target.ptr,
-                                                  device_matches.ptr,
+    dst_kernel<<<block_count, kThreadsPerBlock>>>(s.passwords.ptr,
+                                                  s.user_key.ptr,
+                                                  s.target.ptr,
+                                                  s.matches.ptr,
                                                   count);
     check_cuda(cudaGetLastError(), "failed to launch CUDA kernel");
     check_cuda(cudaDeviceSynchronize(), "failed to execute CUDA kernel");
 
     std::vector<unsigned int> matches(candidate_count, 0);
     check_cuda(cudaMemcpy(matches.data(),
-                          device_matches.ptr,
+                          s.matches.ptr,
                           match_bytes,
                           cudaMemcpyDeviceToHost),
                "failed to download CUDA match buffer");
