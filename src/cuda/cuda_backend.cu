@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <iostream>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -186,6 +187,27 @@ void check_cuda(cudaError_t status, const char* action)
         oss << action << ": " << cudaGetErrorString(status);
         throw std::runtime_error(oss.str());
     }
+}
+
+std::string format_rate(double value)
+{
+    const char* suffix = "";
+    if (value >= 1e9) {
+        value /= 1e9;
+        suffix = "g";
+    } else if (value >= 1e6) {
+        value /= 1e6;
+        suffix = "m";
+    } else if (value >= 1e3) {
+        value /= 1e3;
+        suffix = "k";
+    }
+
+    std::ostringstream oss;
+    oss.setf(std::ios::fixed, std::ios::floatfield);
+    oss.precision(3);
+    oss << value << suffix;
+    return oss.str();
 }
 
 bool probe_device(cudaDeviceProp* prop, std::string* error)
@@ -630,9 +652,11 @@ BenchmarkResult benchmark()
         throw std::runtime_error("CUDA benchmark requested but CUDA is not available at runtime");
     }
 
-    const std::vector<unsigned int> thread_candidates = {128, 256, 384, 512, 640, 768, 896, 1024};
+    const std::vector<unsigned int> thread_candidates = {128, 192, 256, 320, 384, 448, 512, 576,
+                                                         640, 704, 768, 832, 896, 960, 1024};
     const std::vector<std::size_t> batch_candidates =
-        {8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216};
+        {8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608, 262144, 393216,
+         524288, 786432, 1048576, 1572864, 2097152, 3145728, 4194304, 6291456, 8388608, 12582912, 16777216};
 
     PlanData plan;
     PlanPattern pattern;
@@ -656,28 +680,40 @@ BenchmarkResult benchmark()
     BenchmarkResult best;
     const std::size_t original_batch = batch_size();
     const unsigned int original_threads = thread_count();
+    constexpr double kMinBenchmarkSeconds = 0.25;
+    constexpr int kMinIterations = 8;
 
     for (unsigned int threads : thread_candidates) {
         for (std::size_t batch : batch_candidates) {
+            std::cout << "benchmark: trying --cuda-thread-count " << threads
+                      << " --cuda-batch-size " << batch << " ... " << std::flush;
             try {
                 set_launch_config(batch, threads);
                 crack_batch_matches(0, batch, false);
 
-                constexpr int kIterations = 6;
                 const auto started = std::chrono::steady_clock::now();
-                for (int i = 0; i < kIterations; ++i) {
-                    crack_batch_matches(static_cast<std::uint64_t>(i) * batch, batch, false);
-                }
+                int iterations = 0;
+                do {
+                    crack_batch_matches(static_cast<std::uint64_t>(iterations) * batch, batch, false);
+                    ++iterations;
+                } while (iterations < kMinIterations ||
+                         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() <
+                             kMinBenchmarkSeconds);
+
                 const double elapsed =
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-                const double cps = (static_cast<double>(batch) * kIterations) / (elapsed > 1e-6 ? elapsed : 1e-6);
+                const double cps = (static_cast<double>(batch) * iterations) / (elapsed > 1e-6 ? elapsed : 1e-6);
+
+                std::cout << format_rate(cps) << " c/s over " << iterations
+                          << " iterations in " << elapsed << "s" << '\n';
 
                 if (cps > best.candidates_per_second) {
                     best.batch_size = batch;
                     best.thread_count = threads;
                     best.candidates_per_second = cps;
                 }
-            } catch (const std::exception&) {
+            } catch (const std::exception& ex) {
+                std::cout << "skipped (" << ex.what() << ')' << '\n';
                 continue;
             }
         }
