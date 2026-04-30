@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cctype>
 #include <stdexcept>
-#include <string_view>
 
 namespace dst {
 
@@ -269,7 +268,7 @@ std::uint8_t to_cp037(unsigned char c) {
     }
 }
 
-bool is_hex(std::string_view s) {
+bool is_hex(const std::string& s) {
     return std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isxdigit(c) != 0; });
 }
 

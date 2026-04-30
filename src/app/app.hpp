@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <functional>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace ibmbrute_app {
@@ -102,11 +101,11 @@ Config parse_args(int argc, char** argv, std::vector<std::string>& positional);
 bool verify_note_vectors();
 std::vector<TargetEntry> load_targets(const Config& cfg);
 bool has_default_password(const TargetEntry& target);
-bool password_matches_target(const TargetEntry& target, std::string_view password);
+bool password_matches_target(const TargetEntry& target, const std::string& password);
 bool load_found_password(const TargetEntry& target, std::string* password);
-bool save_found_password(const TargetEntry& target, std::string_view password);
+bool save_found_password(const TargetEntry& target, const std::string& password);
 std::size_t resolve_thread_count(const Config& cfg);
-std::string engine_banner(std::string_view requested_engine, const Config& cfg, std::size_t thread_count);
+std::string engine_banner(const std::string& requested_engine, const Config& cfg, std::size_t thread_count);
 std::string metal_banner();
 std::string cuda_banner();
 void apply_cuda_launch_config(const Config& cfg);

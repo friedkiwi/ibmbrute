@@ -35,7 +35,7 @@ std::uint64_t pow_u64(std::uint64_t base, std::size_t exp) {
     return out;
 }
 
-std::string builtin_charset(std::string_view name) {
+std::string builtin_charset(const std::string& name) {
     if (name == "full") {
         return "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#@$_";
     }
@@ -105,7 +105,7 @@ std::vector<Pattern> build_plan_from_mask(const std::string& mask,
     return {std::move(pattern)};
 }
 
-bool is_hex_string(std::string_view s) {
+bool is_hex_string(const std::string& s) {
     if (s.size() != 16) {
         return false;
     }
@@ -470,7 +470,7 @@ std::size_t resolve_thread_count(const Config& cfg) {
     return detect_cpu_cores();
 }
 
-std::string engine_banner(std::string_view requested_engine, const Config& cfg, std::size_t thread_count) {
+std::string engine_banner(const std::string& requested_engine, const Config& cfg, std::size_t thread_count) {
     std::ostringstream oss;
     if (cfg.engine == "metal") {
         oss << "engine: metal (" << (requested_engine == "auto" ? "auto-selected" : "selected by CLI")

@@ -1,20 +1,20 @@
 #include "app.hpp"
 
-#include <filesystem>
 #include <fstream>
 #include <map>
 #include <sstream>
 #include <stdexcept>
+#include <sys/stat.h>
 #include <vector>
 
 namespace ibmbrute_app {
 
 namespace {
 
-std::uint64_t fnv1a64(std::string_view text, std::uint64_t seed = 1469598103934665603ull) {
+std::uint64_t fnv1a64(const std::string& text, std::uint64_t seed = 1469598103934665603ull) {
     std::uint64_t hash = seed;
-    for (unsigned char ch : text) {
-        hash ^= ch;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        hash ^= static_cast<unsigned char>(text[i]);
         hash *= 1099511628211ull;
     }
     return hash;
@@ -31,17 +31,13 @@ std::string hex_u64(std::uint64_t value) {
 }
 
 std::string file_signature(const std::string& path) {
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    if (!fs::exists(path, ec)) {
+    struct stat info;
+    if (stat(path.c_str(), &info) != 0) {
         return "missing";
     }
 
-    const auto size = fs::file_size(path, ec);
-    const auto stamp = fs::last_write_time(path, ec);
-    const auto stamp_count = ec ? 0 : stamp.time_since_epoch().count();
-    return std::to_string(static_cast<unsigned long long>(size)) + ":" +
-           std::to_string(static_cast<long long>(stamp_count));
+    return std::to_string(static_cast<unsigned long long>(info.st_size)) + ":" +
+           std::to_string(static_cast<long long>(info.st_mtime));
 }
 
 std::string default_session_path(const Config& cfg) {
@@ -174,9 +170,8 @@ bool found_record_matches_target(const FoundPasswordRecord& record, const Target
 }
 
 std::vector<FoundPasswordRecord> load_found_password_records(const std::string& path) {
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    if (!fs::exists(path, ec)) {
+    struct stat info;
+    if (stat(path.c_str(), &info) != 0) {
         return {};
     }
 
@@ -257,9 +252,8 @@ std::string session_fingerprint(const Config& cfg) {
 }
 
 bool session_file_exists(const std::string& path) {
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    return fs::exists(path, ec);
+    struct stat info;
+    return stat(path.c_str(), &info) == 0;
 }
 
 bool session_should_resume(const ResumeData& resume, const Config& cfg, const std::string& fingerprint) {
@@ -309,8 +303,8 @@ void save_session_state(const std::string& path,
     save_resume(path, data);
 }
 
-bool password_matches_target(const TargetEntry& target, std::string_view password) {
-    return dst::hash_password(std::string(password), target.user) == target.target;
+bool password_matches_target(const TargetEntry& target, const std::string& password) {
+    return dst::hash_password(password, target.user) == target.target;
 }
 
 bool load_found_password(const TargetEntry& target, std::string* password) {
@@ -330,7 +324,7 @@ bool load_found_password(const TargetEntry& target, std::string* password) {
     return false;
 }
 
-bool save_found_password(const TargetEntry& target, std::string_view password) {
+bool save_found_password(const TargetEntry& target, const std::string& password) {
     if (!password_matches_target(target, password)) {
         return false;
     }
@@ -347,7 +341,7 @@ bool save_found_password(const TargetEntry& target, std::string_view password) {
         if (password_matches_target(target, record.password)) {
             return true;
         }
-        record.password = std::string(password);
+        record.password = password;
         record.target_hex = target.target_hex;
         mutated = true;
     }
