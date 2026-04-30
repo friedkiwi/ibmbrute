@@ -1,6 +1,7 @@
-#include <windows.h>
-#include <commctrl.h>
 #include "gui_resources.h"
+
+#define RT_MANIFEST 24
+#define CREATEPROCESS_MANIFEST_RESOURCE_ID 1
 
 IDD_MAIN_DIALOG DIALOGEX 0, 0, 246, 124
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_CAPTION | WS_MINIMIZEBOX | WS_SYSMENU
