@@ -523,11 +523,14 @@ std::string resolve_engine(const Config& cfg) {
 
 int run_cuda_benchmark(const Config& cfg) {
     if (!cuda_backend::compiled()) {
-        throw std::runtime_error("CUDA benchmark requested but CUDA support is not compiled in");
+        std::cout << "cuda benchmark:\n"
+                  << "  unavailable: CUDA support is not compiled in\n";
+        return 1;
     }
     if (!cuda_backend::available()) {
-        throw std::runtime_error("CUDA benchmark requested but CUDA is not available at runtime: " +
-                                 cuda_backend::device_description());
+        std::cout << "cuda benchmark:\n"
+                  << "  unavailable: " << cuda_backend::device_description() << '\n';
+        return 1;
     }
 
     apply_cuda_launch_config(cfg);

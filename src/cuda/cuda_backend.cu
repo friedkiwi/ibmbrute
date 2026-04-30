@@ -210,9 +210,44 @@ void check_cuda(cudaError_t status, const char* action)
 {
     if (status != cudaSuccess) {
         std::ostringstream oss;
-        oss << action << ": " << cudaGetErrorString(status);
+        oss << action << ": " << cudaGetErrorName(status)
+            << " (" << static_cast<int>(status) << "): " << cudaGetErrorString(status);
         throw std::runtime_error(oss.str());
     }
+}
+
+std::string cuda_error_text(cudaError_t status)
+{
+    std::ostringstream oss;
+    oss << cudaGetErrorName(status) << " (" << static_cast<int>(status)
+        << "): " << cudaGetErrorString(status);
+    return oss.str();
+}
+
+std::string runtime_versions()
+{
+    int driver_version = 0;
+    int runtime_version = 0;
+    const cudaError_t driver_status = cudaDriverGetVersion(&driver_version);
+    const cudaError_t runtime_status = cudaRuntimeGetVersion(&runtime_version);
+
+    std::ostringstream oss;
+    oss << "driver version ";
+    if (driver_status == cudaSuccess && driver_version != 0) {
+        oss << driver_version;
+    } else if (driver_status == cudaSuccess) {
+        oss << "not loaded";
+    } else {
+        oss << cuda_error_text(driver_status);
+    }
+
+    oss << ", runtime version ";
+    if (runtime_status == cudaSuccess) {
+        oss << runtime_version;
+    } else {
+        oss << cuda_error_text(runtime_status);
+    }
+    return oss.str();
 }
 
 std::string format_rate(double value)
@@ -242,7 +277,7 @@ bool probe_device(int index, cudaDeviceProp* prop, std::string* error)
     const cudaError_t count_status = cudaGetDeviceCount(&device_count);
     if (count_status != cudaSuccess) {
         if (error != nullptr) {
-            *error = cudaGetErrorString(count_status);
+            *error = cuda_error_text(count_status) + " (" + runtime_versions() + ")";
         }
         return false;
     }
@@ -263,7 +298,7 @@ bool probe_device(int index, cudaDeviceProp* prop, std::string* error)
     const cudaError_t prop_status = cudaGetDeviceProperties(&local_prop, index);
     if (prop_status != cudaSuccess) {
         if (error != nullptr) {
-            *error = cudaGetErrorString(prop_status);
+            *error = cuda_error_text(prop_status) + " (" + runtime_versions() + ")";
         }
         return false;
     }
