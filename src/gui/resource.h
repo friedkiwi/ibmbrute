@@ -6,8 +6,12 @@
 #include <winres.h>
 #endif
 
+#ifndef CREATEPROCESS_MANIFEST_RESOURCE_ID
 #define CREATEPROCESS_MANIFEST_RESOURCE_ID 1
+#endif
+#ifndef RT_MANIFEST
 #define RT_MANIFEST                     24
+#endif
 #define IDD_MAIN_DIALOG                 101
 #define IDD_CONFIG_DIALOG               102
 #define IDD_BENCHMARK_DIALOG            103
