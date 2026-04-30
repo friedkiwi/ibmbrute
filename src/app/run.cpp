@@ -95,10 +95,10 @@ int run_cli(int argc, char** argv) {
             throw std::runtime_error("use either --hashfile or --target, not both");
         }
 
+        const auto targets = load_targets(cfg);
         const std::string fingerprint = session_fingerprint(cfg);
         const std::string session_path = resolve_session_path(cfg);
         const auto plan = build_plan_from_config(cfg);
-        const auto targets = load_targets(cfg);
         const std::uint64_t per_target_total = total_candidates(plan);
         if (per_target_total == 0) {
             throw std::runtime_error("empty search space");
@@ -171,6 +171,22 @@ int run_cli(int argc, char** argv) {
         for (std::size_t target_index = start_target_index; target_index < targets.size(); ++target_index) {
             const auto& target = targets[target_index];
             const std::uint64_t target_start = (target_index == start_target_index) ? start_position : 0;
+
+            if (has_default_password(target)) {
+                any_cracked = true;
+                ++total_matches;
+                std::cout << target.user << ':' << target.user << " -> " << target.target_hex << '\n';
+                save_session_state(session_path,
+                                   cfg,
+                                   fingerprint,
+                                   target_index + 1,
+                                   0,
+                                   target_index + 1 >= targets.size(),
+                                   target.user,
+                                   target.target_hex);
+                continue;
+            }
+
             CrackOutcome current_outcome;
             if (cfg.engine == "metal") {
                 current_outcome = crack_target_metal(target,

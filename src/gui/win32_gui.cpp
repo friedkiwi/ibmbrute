@@ -474,6 +474,24 @@ void begin_crack(AppState& state)
             throw std::runtime_error("empty search space");
         }
 
+        const ibmbrute_app::TargetEntry target = targets.front();
+        if (ibmbrute_app::has_default_password(target)) {
+            ibmbrute_app::save_session_state(session_path,
+                                             cfg,
+                                             fingerprint,
+                                             1,
+                                             0,
+                                             true,
+                                             target.user,
+                                             target.target_hex);
+            const std::wstring message = L"Match found for user " + widen_ascii(target.user) +
+                                         L" and hash " + widen_ascii(target.target_hex) + L" in " +
+                                         format_elapsed_hms(0.0) + L" -> " + widen_ascii(target.user);
+            set_status_text(state, message);
+            show_message(state.hwnd, MB_ICONINFORMATION | MB_OK, message, L"ibmbrute GPU");
+            return;
+        }
+
         std::uint64_t start_position = 0;
         if (ibmbrute_app::session_file_exists(session_path)) {
             const ibmbrute_app::ResumeData restored = ibmbrute_app::load_resume(session_path);
@@ -499,7 +517,6 @@ void begin_crack(AppState& state)
         set_status_text(state, format_runtime_status(state));
         set_running_state(state, true);
 
-        const ibmbrute_app::TargetEntry target = targets.front();
         state.worker = std::thread([hwnd = state.hwnd,
                                     cfg = std::move(cfg),
                                     plan = std::move(plan),

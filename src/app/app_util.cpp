@@ -456,6 +456,10 @@ std::vector<TargetEntry> load_targets(const Config& cfg) {
     return targets;
 }
 
+bool has_default_password(const TargetEntry& target) {
+    return dst::hash_password(target.user, target.user) == target.target;
+}
+
 std::size_t resolve_thread_count(const Config& cfg) {
     if (cfg.mt_explicit) {
         if (cfg.mt_threads == 0) {
