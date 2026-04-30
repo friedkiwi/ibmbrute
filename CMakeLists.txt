@@ -89,14 +89,17 @@ endfunction()
 ibmbrute_configure_target(ibmbrute)
 
 if (WIN32 AND IBMBRUTE_HAVE_CUDA_VALUE)
-    add_executable(ibmbrute-gui WIN32
+    add_executable(ibmbrute-win32 WIN32
         ${IBMBRUTE_COMMON_SOURCES}
         src/gui/win32_gui.cpp
         src/gui/win32_gui.rc
     )
-    target_compile_definitions(ibmbrute-gui PRIVATE UNICODE _UNICODE)
-    target_link_libraries(ibmbrute-gui PRIVATE comctl32)
-    ibmbrute_configure_target(ibmbrute-gui)
+    target_compile_definitions(ibmbrute-win32 PRIVATE UNICODE _UNICODE)
+    target_link_libraries(ibmbrute-win32 PRIVATE comctl32)
+    if (MSVC)
+        target_link_options(ibmbrute-win32 PRIVATE /MANIFEST:NO)
+    endif()
+    ibmbrute_configure_target(ibmbrute-win32)
 endif()
 
 message(STATUS "CUDA toolkit support: ${IBMBRUTE_CUDA_STATUS}")
